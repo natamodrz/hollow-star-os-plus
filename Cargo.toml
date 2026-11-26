@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "hal/hal-core",
+    "hal/board-raspi3b",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true

@@ -1,0 +1,6 @@
+[package]
+name = "hal-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hardware-agnostic HAL traits and DTB parser for Hollow Star OS+"

@@ -1,0 +1,20 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Delta Kernel — modular microkernel for Hollow Star OS+"
+
+[[bin]]
+name = "kernel"
+test = false
+bench = false
+
+[features]
+default = ["board-raspi3b"]
+board-raspi3b = ["dep:board-raspi3b"]
+mini-uart = ["board-raspi3b?/mini-uart"]
+
+[dependencies]
+hal-core = { path = "../hal/hal-core" }
+board-raspi3b = { path = "../hal/board-raspi3b", optional = true }

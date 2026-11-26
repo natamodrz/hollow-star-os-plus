@@ -1,0 +1,13 @@
+[package]
+name = "board-raspi3b"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Raspberry Pi 3B (BCM2837) board support crate for Hollow Star OS+"
+
+[features]
+default = []
+mini-uart = []
+
+[dependencies]
+hal-core = { path = "../hal-core" }

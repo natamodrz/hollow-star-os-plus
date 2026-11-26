@@ -1,0 +1,30 @@
+hollow-star-os-plus/
+├── AGENTS.md                 # Stały kontekst projektu dla Google Antigravity
+├── Cargo.toml                # Workspace (no_std dla kernela/HAL, std/custom dla userlandu)
+├── LICENSE                   # Licencja GNU GPL v3.0
+├── README.md                 # Dokumentacja główna projektu (EN, alert vibe-coded, wydania)
+├── rust-toolchain.toml       # Przypięty toolchain Rust, target aarch64-unknown-none i komponenty
+├── .cargo/config.toml        # Domyślny target: aarch64-unknown-none + runner QEMU
+├── .gitignore                # Reguły ignorowania artefaktów kompilacji, obrazów i first-prompt.txt
+├── delta.sh                  # Główny skrypt build/check/unit/smoke/ci
+├── run-qemu.sh               # Wrapper uruchamiający obraz w qemu-system-aarch64 (-M raspi3b)
+├── docs/
+│   ├── architecture.md       # Specyfikacja IPC, capabilities i mikrojądra Delta
+│   ├── scheduler.md          # Projekt planisty inspirowanego BeOS
+│   └── MILESTONES.md         # Szczegółowy plan i status kamieni milowych M1–M6
+├── kernel/                   # Delta Kernel (mikrojądro: boot, MMU, IPC, wątki, scheduler)
+├── hal/                      # Warstwa abstrakcji sprzętu (łatwe portowanie między SBC)
+│   ├── hal-core/             # Cechy (traits): UART, Timer, IRQ, Mem, Board, DTB parser
+│   ├── board-raspi3b/        # BCM2837 (RPi 3B - główny target rozwojowy)
+│   └── board-raspicm0/       # RP3A0 / BCM2837 (RPi CM0 - przyszły target)
+├── drivers/                  # Sterowniki jako osobne serwery w przestrzeni użytkownika
+│   ├── drv-uart/
+│   ├── drv-fb/               # Framebuffer (HDMI / DSI / SPI)
+│   ├── drv-sd/               # SD / eMMC (EMMC2 / SDHOST)
+│   └── drv-audio/
+├── fs/                       # VFS + sterowniki systemów plików (FAT32, ext2) w userlandzie
+├── userland/
+│   ├── libdelta/             # Syscalle, IPC, wątki, interfejs POSIX/Unix-like
+│   ├── init/                 # Pierwszy proces uruchamiający serwery systemowe
+│   └── shell/                # Interaktywna powłoka Unix-like
+└── apps/                     # Aplikacje systemowe i użytkownika (notatnik MD, multimedia, gry)
