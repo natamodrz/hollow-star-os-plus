@@ -16,7 +16,7 @@ hollow-star-os-plus/
 ├── hal/                      # Warstwa abstrakcji sprzętu (łatwe portowanie między SBC)
 │   ├── hal-core/             # Cechy (traits): UART, Timer, IRQ, Mem, Board, DTB parser
 │   ├── board-raspi3b/        # BCM2837 (RPi 3B - główny target rozwojowy)
-│   └── board-raspicm0/       # RP3A0 / BCM2837 (RPi CM0 - przyszły target)
+│   └── board-raspi02w/       # RP3A0 / BCM2837 (RPi Zero 2 W - przyszły target)
 ├── drivers/                  # Sterowniki jako osobne serwery w przestrzeni użytkownika
 │   ├── drv-uart/
 │   ├── drv-fb/               # Framebuffer (HDMI / DSI / SPI)

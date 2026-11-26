@@ -4,8 +4,8 @@
 **Hollow Star OS+** is a modular, Unix-like operating system written in **Rust** (`no_std` kernel + modular userspace).
 - **Kernel Name:** **Delta Kernel** (strict microkernel architecture).
 - **Primary Development Target:** Raspberry Pi 3B (`aarch64-unknown-none`, BCM2837, 4x Cortex-A53, 1 GB RAM) + **QEMU `raspi3b`** for automated testing.
-- **Secondary / Future Target:** Raspberry Pi Compute Module Zero (CM0, RP3A0 / BCM2837, 4x Cortex-A53, 512 MB RAM, optional eMMC, CYW43439) and other ARM64/RISC-V SBCs.
-- **Portability First:** Never hardcode board-specific MMIO addresses inside `kernel/`. Always go through `hal-core` traits and Device Tree Blob (DTB) parsing so porting from RPi 3B to CM0 or another SBC only requires a board crate / DTB.
+- **Secondary / Future Target:** Raspberry Pi Zero 2 W (`raspi02w`, RP3A0 / BCM2837, 4x Cortex-A53, 512 MB RAM, microSD, CYW43439) and other ARM64/RISC-V SBCs.
+- **Portability First:** Never hardcode board-specific MMIO addresses inside `kernel/`. Always go through `hal-core` traits and Device Tree Blob (DTB) parsing so porting from RPi 3B to Zero 2 W or another SBC only requires a board crate / DTB.
 
 ## Core Architecture (Modular Microkernel)
 1. **Delta Kernel (`kernel/`):** Minimal trusted computing base running in EL1:

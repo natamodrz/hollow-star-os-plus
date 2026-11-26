@@ -4,7 +4,7 @@
 //! Raspberry Pi 3B (BCM2837) board implementation for [`hal_core`].
 //!
 //! All BCM2837 physical MMIO addresses live strictly inside this crate so that
-//! `kernel/` stays portable across boards (e.g. RPi 3B, CM0, or other ARM64 SBCs).
+//! `kernel/` stays portable across boards (e.g. RPi 3B, RPi Zero 2 W, or other ARM64 SBCs).
 
 mod gpio;
 pub mod irq;

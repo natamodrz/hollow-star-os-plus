@@ -6,7 +6,7 @@
 
 - **Jądro:** **Delta Kernel** — ścisłe mikrojądro działające w trybie uprzywilejowanym **EL1** (AArch64).
 - **Minimalne TCB (Trusted Computing Base):** w EL1 pozostaje wyłącznie to, co niezbędne do izolacji pamięci, komunikacji międzyprocesowej (IPC), przełączania wątków oraz dystrybucji przerwań sprzętowych.
-- **Przenośność przede wszystkim:** kod w `kernel/` nie może zawierać zaszytych na stałe adresów MMIO specyficznych dla danego SoC. Dostęp do sprzętu odbywa się poprzez cechy w `hal/hal-core/`, implementacje płytek (`hal/board-raspi3b/`, docelowo `hal/board-raspicm0/`) oraz parsowanie Device Tree Blob (DTB).
+- **Przenośność przede wszystkim:** kod w `kernel/` nie może zawierać zaszytych na stałe adresów MMIO specyficznych dla danego SoC. Dostęp do sprzętu odbywa się poprzez cechy w `hal/hal-core/`, implementacje płytek (`hal/board-raspi3b/`, docelowo `hal/board-raspi02w/`) oraz parsowanie Device Tree Blob (DTB).
 
 ---
 
@@ -33,7 +33,7 @@
 |  hal/        hal-core (cechy: SerialConsole, Board, InterruptController,  |
 |              Timer, MemoryRegion, Dtb) + board-raspi3b (BCM2837 MMIO)|
 +-----------------------------------------------------------------------+
-|  Sprzęt      Raspberry Pi 3B (BCM2837) / QEMU raspi3b / RPi CM0       |
+|  Sprzęt      Raspberry Pi 3B (BCM2837) / QEMU raspi3b / RPi Zero 2 W  |
 +-----------------------------------------------------------------------+
 ```
 

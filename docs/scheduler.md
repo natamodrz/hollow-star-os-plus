@@ -2,7 +2,7 @@
 
 ## 1. Założenia projektowe
 
-System **Hollow Star OS+** kładzie nacisk na płynną wielozadaniowość i responsywność multimediów w czasie rzeczywistym na wielordzeniowych układach ARM64 (4x Cortex-A53 w Raspberry Pi 3B oraz przyszłym RPi CM0).
+System **Hollow Star OS+** kładzie nacisk na płynną wielozadaniowość i responsywność multimediów w czasie rzeczywistym na wielordzeniowych układach ARM64 (4x Cortex-A53 w Raspberry Pi 3B oraz przyszłym RPi Zero 2 W).
 
 Zamiast ciężkiego modelu z gruboziarnistymi procesami, Delta Kernel traktuje **wątek (Thread)** jako podstawową jednostkę planowania na wszystkich dostępnych rdzeniach CPU (SMP — *pervasive multithreading*).
 

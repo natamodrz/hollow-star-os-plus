@@ -3,7 +3,7 @@
 > [!WARNING]
 > **Vibe-Coded Project Notice:** This project is **vibe-coded** — built and iterated rapidly with AI coding assistance (`Google Antigravity`). While every kernel milestone is tested under `qemu-system-aarch64 -M raspi3b`, treat this OS and microkernel as experimental hobby software: review code and hardware wiring before flashing physical SD cards, keep backups of important data, and report or PR any edge-case bugs you encounter.
 
-A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Microkernel** + modular EL0 userspace servers) targeting **Raspberry Pi 3B** (`BCM2837`, 4× Cortex-A53, 1 GB RAM) and **Raspberry Pi Compute Module Zero** (`CM0`, `RP3A0` / `BCM2837`), inspired by the BeOS multimedia scheduler and capability-based microkernels (`seL4` / Mach).
+A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Microkernel** + modular EL0 userspace servers) targeting **Raspberry Pi 3B** (`BCM2837`, 4× Cortex-A53, 1 GB RAM) and **Raspberry Pi Zero 2 W** (`raspi02w`, `RP3A0` / `BCM2837`), inspired by the BeOS multimedia scheduler and capability-based microkernels (`seL4` / Mach).
 
 ---
 
@@ -16,7 +16,7 @@ A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Micr
 ## Architecture & Planned Features
 
 - **Delta Microkernel (`kernel/`, EL1):**
-  - Strictly hardware-agnostic kernel code — all SoC MMIO addresses are isolated in board crates (`hal/board-raspi3b`, future `hal/board-raspicm0`) behind `hal-core` traits and Device Tree Blob (`DTB`) parsing.
+  - Strictly hardware-agnostic kernel code — all SoC MMIO addresses are isolated in board crates (`hal/board-raspi3b`, future `hal/board-raspi02w`) behind `hal-core` traits and Device Tree Blob (`DTB`) parsing.
   - Physical 4 KiB frame allocator, AArch64 MMU with W^X kernel permissions (`TTBR0_EL1` identity/user + `TTBR1_EL1` higher-half kernel), EL1 exception vector table, and ARM Generic Timer IRQ handling.
   - **BeOS-Inspired SMP Multimedia Scheduler (planned M3):** Priority tiers `1..=120` including Real-Time audio/video (`100..=120`) and priority inheritance on IPC/mutexes.
   - **Capability & Port IPC (planned M4):** Synchronous/asynchronous port message passing and userspace IRQ forwarding.
@@ -33,15 +33,15 @@ A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Micr
 | :--- | :--- | :--- | :--- |
 | **QEMU `raspi3b`** | Emulated BCM2837 (4× Cortex-A53) | 1 GB | Primary automated CI target (`./delta.sh smoke`) |
 | **Raspberry Pi 3B** | BCM2837 (4× Cortex-A53, Wi-Fi/BT) | 1 GB | Primary physical development target |
-| **Raspberry Pi CM0** | RP3A0 / BCM2837 (4× Cortex-A53, optional eMMC, CYW43439) | 512 MB | Secondary/future target (`hal/board-raspicm0`) |
+| **Raspberry Pi Zero 2 W** | RP3A0 / BCM2837 (4× Cortex-A53, microSD, CYW43439) | 512 MB | Secondary/future target (`hal/board-raspi02w`) |
 
 ---
 
 ## Prebuilt Downloads (`.img`)
 
-Once versioned board images are published, downloadable `.img` binaries for `raspi3b` and `cm0` will be attached directly as assets under **[GitHub Releases](../../releases)** using the naming scheme:
+Once versioned board images are published, downloadable `.img` binaries for `raspi3b` and `raspi02w` will be attached directly as assets under **[GitHub Releases](../../releases)** using the naming scheme:
 - `hollow-star-os-plus-raspi3b-vX.Y.Z.img`
-- `hollow-star-os-plus-cm0-vX.Y.Z.img`
+- `hollow-star-os-plus-raspi02w-vX.Y.Z.img`
 
 *(Currently in pre-`v1.0.0` kernel milestone development — build from source below.)*
 
