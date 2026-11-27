@@ -57,9 +57,14 @@ const HCINT_XFERCOMP: u32 = 1 << 0;
 const HCINT_CHHLTD: u32 = 1 << 1;
 const HCINT_STALL: u32 = 1 << 3;
 const HCINT_NAK: u32 = 1 << 4;
+const HCINT_ACK: u32 = 1 << 5;
+const HCINT_NYET: u32 = 1 << 6;
 const HCINT_XACTERR: u32 = 1 << 7;
 const HCINT_BBLERR: u32 = 1 << 8;
 const HCINT_DATATGLERR: u32 = 1 << 10;
+
+const HCSPLT_SPLTENA: u32 = 1 << 31;
+const HCSPLT_COMPSPLT: u32 = 1 << 16;
 
 const PID_DATA0: u32 = 0;
 const PID_DATA1: u32 = 2;
@@ -177,6 +182,13 @@ impl Dwc2Host {
         }
     }
 
+    fn delay_ms(&self, ms: u64) {
+        let end = Self::now_ms().saturating_add(ms.max(1));
+        while Self::now_ms() < end {
+            libdelta::yield_now();
+        }
+    }
+
     fn flush_fifos(&self) {
         self.write(GRSTCTL, GRST_RXFFLSH | GRST_TXFFLSH | GRST_TXFNUM_ALL);
         for _ in 0..50_000 {
@@ -187,43 +199,62 @@ impl Dwc2Host {
         }
     }
 
+    fn halt_ch0(&self) {
+        let ch = self.read(HCCHAR0);
+        if (ch & (1 << 31)) != 0 {
+            self.write(HCCHAR0, (ch & !(1 << 31)) | (1 << 30));
+            for _ in 0..10_000 {
+                if (self.read(HCINT0) & HCINT_CHHLTD) != 0 || (self.read(HCCHAR0) & (1 << 31)) == 0
+                {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+        }
+    }
+
     fn reset_core(&self) {
-        for _ in 0..100_000 {
+        for _ in 0..200_000 {
             if (self.read(GRSTCTL) & GRST_AHBIDLE) != 0 {
                 break;
             }
             core::hint::spin_loop();
         }
         self.write(GRSTCTL, GRST_CSFTRST);
-        for _ in 0..100_000 {
+        for _ in 0..200_000 {
             if (self.read(GRSTCTL) & GRST_CSFTRST) == 0 {
                 break;
             }
             core::hint::spin_loop();
         }
-        self.spin_delay(50_000);
+        self.delay_ms(10);
 
         // Force Host mode, enable Buffer DMA mode (`GAHBCFG.DMAEn`), configure FIFOs & clocks.
         self.write(GAHBCFG, 1 << 5);
         let mut gusb = self.read(GUSBCFG);
         gusb &= !((1 << 29) | (1 << 30) | (0xF << 10));
-        gusb |= (1 << 29) | (5 << 10); // Force host mode
+        gusb |= (1 << 29) | (5 << 10); // Force host mode + HS TRDT
         self.write(GUSBCFG, gusb);
-        self.spin_delay(100_000);
+        self.delay_ms(25);
 
         self.write(GRXFSIZ, 512);
         self.write(GNPTXFSIZ, (256 << 16) | 512);
         self.write(HPTXFSIZ, (256 << 16) | 768);
         self.flush_fifos();
 
-        self.write(HCFG, 0x05); // 48 MHz clock, FS/LS PHY
-        self.write(HFIR, 48_000);
+        // Keep `FSLSSUPP = 0` initially so High-Speed LAN9514 (RPi 3B) links at 480 Mbps.
+        let hcfg = self.read(HCFG) & !0x7;
+        self.write(HCFG, hcfg);
         self.write(GINTMSK, 0);
         self.write(GINTSTS, 0xFFFF_FFFF);
 
-        // Power root port.
+        // Power root port and wait up to 250 ms for downstream hub/device attach.
         let hprt = (self.read(HPRT) & !HPRT_W1C_MASK) | HPRT_PWR;
         self.write(HPRT, hprt);
+        let deadline = Self::now_ms().saturating_add(250);
+        while (self.read(HPRT) & HPRT_CONNSTS) == 0 && Self::now_ms() < deadline {
+            self.delay_ms(5);
+        }
     }
 
     fn reset_root_port(&self) -> Option<u32> {
@@ -231,24 +262,31 @@ impl Dwc2Host {
         if (hprt & HPRT_CONNSTS) == 0 {
             return None;
         }
-        // Assert USB bus reset
+        // Assert USB bus reset (>= 50 ms per USB 2.0 spec)
         hprt = (self.read(HPRT) & !HPRT_W1C_MASK) | HPRT_RST;
         self.write(HPRT, hprt);
-        self.spin_delay(200_000);
+        self.delay_ms(60);
 
-        // Deassert reset
+        // Deassert reset & allow recovery time
         hprt = (self.read(HPRT) & !HPRT_W1C_MASK) & !HPRT_RST;
         self.write(HPRT, hprt);
-        self.spin_delay(100_000);
+        self.delay_ms(20);
 
         let status = self.read(HPRT);
-        // Clear connect/enable change flags while preserving PRTENA.
         self.write(HPRT, (status & !HPRT_W1C_MASK) | HPRT_CONNDET | HPRT_ENCHNG);
         if (status & HPRT_ENA) == 0 {
-            // QEMU sometimes needs a yield tick for PRTENA.
-            libdelta::yield_now();
+            self.delay_ms(10);
         }
-        Some((self.read(HPRT) >> HPRT_SPD_SHIFT) & 0x3)
+        let spd = (self.read(HPRT) >> HPRT_SPD_SHIFT) & 0x3;
+        if spd != 0 {
+            // Direct Full/Low-Speed device (QEMU usb-kbd or Zero 2 W OTG): switch HCFG to 48 MHz FS/LS clock.
+            self.write(HCFG, 0x05);
+            self.write(HFIR, 48_000);
+        } else {
+            self.write(HCFG, self.read(HCFG) & !0x7);
+            self.write(HFIR, 60_000);
+        }
+        Some(spd)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -264,17 +302,6 @@ impl Dwc2Host {
         pid: u32,
         data: &[u8],
     ) -> Result<(), ()> {
-        self.write(HCINT0, 0xFFFF_FFFF);
-        self.write(HCINTMSK0, 0x7FF);
-        if hub_addr != 0 {
-            self.write(
-                HCSPLT0,
-                (1 << 31) | (3 << 14) | (u32::from(hub_addr) << 7) | u32::from(hub_port),
-            );
-        } else {
-            self.write(HCSPLT0, 0);
-        }
-
         let len = data.len().min(512);
         if len > 0 {
             // SAFETY: `self.dma_va` is a 4 KiB Non-Cacheable DMA page and `len <= 512`.
@@ -294,9 +321,6 @@ impl Dwc2Host {
         } else {
             len32.div_ceil(u32::from(mps.max(8)))
         };
-        self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | len32);
-        self.write(HCDMA0, self.hcdma_addr());
-
         let ls_bit = if low_speed { 1 << 17 } else { 0 };
         let hcchar = u32::from(mps.max(8))
             | (u32::from(ep & 0xF) << 11)
@@ -305,21 +329,105 @@ impl Dwc2Host {
             | (1 << 20)
             | (u32::from(dev_addr) << 22)
             | (1 << 31);
-        self.write(HCCHAR0, hcchar);
 
-        for _ in 0..100_000 {
-            let hcint = self.read(HCINT0);
-            if (hcint & HCINT_XFERCOMP) != 0 {
-                return Ok(());
+        if hub_addr == 0 {
+            self.write(HCINT0, 0xFFFF_FFFF);
+            self.write(HCINTMSK0, 0x7FF);
+            self.write(HCSPLT0, 0);
+            self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | len32);
+            self.write(HCDMA0, self.hcdma_addr());
+            self.write(HCCHAR0, hcchar);
+
+            for _ in 0..200_000 {
+                let hcint = self.read(HCINT0);
+                if (hcint & HCINT_XFERCOMP) != 0 {
+                    return Ok(());
+                }
+                if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR | HCINT_NAK | HCINT_CHHLTD))
+                    != 0
+                {
+                    self.halt_ch0();
+                    return Err(());
+                }
+                core::hint::spin_loop();
             }
-            if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR)) != 0 {
-                return Err(());
-            }
-            if (hcint & HCINT_NAK) != 0 || (hcint & HCINT_CHHLTD) != 0 {
-                return Err(());
-            }
-            core::hint::spin_loop();
+            self.halt_ch0();
+            return Err(());
         }
+
+        // Split Transaction (`SSPLIT` -> `CSPLIT`) for Full/Low-Speed child behind High-Speed Hub.
+        let base_splt =
+            HCSPLT_SPLTENA | (3 << 14) | (u32::from(hub_addr) << 7) | u32::from(hub_port);
+        let mut ssplit_ok = false;
+        for _ in 0..8 {
+            self.write(HCINT0, 0xFFFF_FFFF);
+            self.write(HCINTMSK0, 0x7FF);
+            self.write(HCSPLT0, base_splt);
+            self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | len32);
+            self.write(HCDMA0, self.hcdma_addr());
+            self.write(HCCHAR0, hcchar);
+            for _ in 0..100_000 {
+                let hcint = self.read(HCINT0);
+                if (hcint & HCINT_XFERCOMP) != 0 {
+                    return Ok(());
+                }
+                if (hcint & HCINT_ACK) != 0 {
+                    ssplit_ok = true;
+                    break;
+                }
+                if (hcint & (HCINT_NYET | HCINT_NAK)) != 0 {
+                    self.halt_ch0();
+                    break;
+                }
+                if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR)) != 0 {
+                    self.halt_ch0();
+                    return Err(());
+                }
+                if (hcint & HCINT_CHHLTD) != 0 {
+                    ssplit_ok = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if ssplit_ok {
+                break;
+            }
+            self.spin_delay(20_000);
+        }
+        if !ssplit_ok {
+            self.halt_ch0();
+            return Err(());
+        }
+
+        self.spin_delay(25_000);
+        for _ in 0..48 {
+            self.write(HCINT0, 0xFFFF_FFFF);
+            self.write(HCINTMSK0, 0x7FF);
+            self.write(HCSPLT0, base_splt | HCSPLT_COMPSPLT);
+            self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | len32);
+            self.write(HCDMA0, self.hcdma_addr());
+            self.write(HCCHAR0, hcchar);
+            for _ in 0..100_000 {
+                let hcint = self.read(HCINT0);
+                if (hcint & HCINT_XFERCOMP) != 0 {
+                    return Ok(());
+                }
+                if (hcint & HCINT_NYET) != 0 {
+                    self.halt_ch0();
+                    break;
+                }
+                if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR | HCINT_NAK)) != 0 {
+                    self.halt_ch0();
+                    return Err(());
+                }
+                if (hcint & HCINT_CHHLTD) != 0 {
+                    return Ok(());
+                }
+                core::hint::spin_loop();
+            }
+            self.spin_delay(20_000);
+        }
+        self.halt_ch0();
         Err(())
     }
 
@@ -336,26 +444,12 @@ impl Dwc2Host {
         pid: u32,
         dst: &mut [u8],
     ) -> Result<usize, u32> {
-        self.write(HCINT0, 0xFFFF_FFFF);
-        self.write(HCINTMSK0, 0x7FF);
-        if hub_addr != 0 {
-            self.write(
-                HCSPLT0,
-                (1 << 31) | (3 << 14) | (u32::from(hub_addr) << 7) | u32::from(hub_port),
-            );
-        } else {
-            self.write(HCSPLT0, 0);
-        }
-
         let want = dst.len().min(512);
         let pktcnt = if want == 0 {
             1
         } else {
             want.div_ceil(usize::from(mps.max(8))) as u32
         };
-        self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | (want as u32));
-        self.write(HCDMA0, self.hcdma_addr());
-
         let ls_bit = if low_speed { 1 << 17 } else { 0 };
         let hcchar = u32::from(mps.max(8))
             | (u32::from(ep & 0xF) << 11)
@@ -365,57 +459,144 @@ impl Dwc2Host {
             | (1 << 20)
             | (u32::from(dev_addr) << 22)
             | (1 << 31);
-        self.write(HCCHAR0, hcchar);
 
-        for _ in 0..80_000 {
-            let hcint = self.read(HCINT0);
-            if (hcint & HCINT_XFERCOMP) != 0 {
-                #[cfg(target_arch = "aarch64")]
-                // SAFETY: Order DMA payload reads after hardware completion flag.
-                unsafe {
-                    core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        if hub_addr == 0 {
+            self.write(HCINT0, 0xFFFF_FFFF);
+            self.write(HCINTMSK0, 0x7FF);
+            self.write(HCSPLT0, 0);
+            self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | (want as u32));
+            self.write(HCDMA0, self.hcdma_addr());
+            self.write(HCCHAR0, hcchar);
+
+            for _ in 0..120_000 {
+                let hcint = self.read(HCINT0);
+                if (hcint & HCINT_XFERCOMP) != 0 {
+                    return Ok(self.copy_dma_in(want, dst));
                 }
-                let rem = (self.read(HCTSIZ0) & 0x7_FFFF) as usize;
-                let received = want.saturating_sub(rem);
-                if received > 0 {
-                    // SAFETY: `self.dma_va` holds `received <= dst.len()` DMA IN bytes.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            self.dma_va as *const u8,
-                            dst.as_mut_ptr(),
-                            received,
-                        );
+                if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR | HCINT_DATATGLERR)) != 0 {
+                    self.halt_ch0();
+                    return Err(hcint);
+                }
+                if (hcint & HCINT_NAK) != 0 {
+                    self.halt_ch0();
+                    return Err(HCINT_NAK);
+                }
+                if (hcint & HCINT_CHHLTD) != 0 {
+                    let received = self.copy_dma_in(want, dst);
+                    if received > 0 {
+                        return Ok(received);
                     }
+                    return Err(hcint);
                 }
-                return Ok(received);
+                core::hint::spin_loop();
             }
-            if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR | HCINT_DATATGLERR)) != 0 {
-                return Err(hcint);
-            }
-            if (hcint & HCINT_NAK) != 0 {
-                self.write(HCCHAR0, (hcchar & !(1 << 31)) | (1 << 30));
-                return Err(HCINT_NAK);
-            }
-            if (hcint & HCINT_CHHLTD) != 0 {
-                let rem = (self.read(HCTSIZ0) & 0x7_FFFF) as usize;
-                let received = want.saturating_sub(rem);
-                if received > 0 {
-                    // SAFETY: `self.dma_va` holds `received <= dst.len()` bytes before halt.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            self.dma_va as *const u8,
-                            dst.as_mut_ptr(),
-                            received,
-                        );
-                    }
-                    return Ok(received);
-                }
-                return Err(hcint);
-            }
-            core::hint::spin_loop();
+            self.halt_ch0();
+            return Err(0);
         }
-        self.write(HCCHAR0, (hcchar & !(1 << 31)) | (1 << 30));
+
+        // Split Transaction (`SSPLIT` -> `CSPLIT`) for Full/Low-Speed child behind High-Speed Hub.
+        let base_splt =
+            HCSPLT_SPLTENA | (3 << 14) | (u32::from(hub_addr) << 7) | u32::from(hub_port);
+        let mut ssplit_ok = false;
+        for _ in 0..8 {
+            self.write(HCINT0, 0xFFFF_FFFF);
+            self.write(HCINTMSK0, 0x7FF);
+            self.write(HCSPLT0, base_splt);
+            self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | (want as u32));
+            self.write(HCDMA0, self.hcdma_addr());
+            self.write(HCCHAR0, hcchar);
+            for _ in 0..80_000 {
+                let hcint = self.read(HCINT0);
+                if (hcint & HCINT_XFERCOMP) != 0 {
+                    return Ok(self.copy_dma_in(want, dst));
+                }
+                if (hcint & HCINT_ACK) != 0 {
+                    ssplit_ok = true;
+                    break;
+                }
+                if (hcint & (HCINT_NYET | HCINT_NAK)) != 0 {
+                    self.halt_ch0();
+                    break;
+                }
+                if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR | HCINT_DATATGLERR)) != 0 {
+                    self.halt_ch0();
+                    return Err(hcint);
+                }
+                if (hcint & HCINT_CHHLTD) != 0 {
+                    ssplit_ok = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if ssplit_ok {
+                break;
+            }
+            self.spin_delay(20_000);
+        }
+        if !ssplit_ok {
+            self.halt_ch0();
+            return Err(0);
+        }
+
+        self.spin_delay(25_000);
+        for _ in 0..48 {
+            self.write(HCINT0, 0xFFFF_FFFF);
+            self.write(HCINTMSK0, 0x7FF);
+            self.write(HCSPLT0, base_splt | HCSPLT_COMPSPLT);
+            self.write(HCTSIZ0, (pid << 29) | (pktcnt << 19) | (want as u32));
+            self.write(HCDMA0, self.hcdma_addr());
+            self.write(HCCHAR0, hcchar);
+            for _ in 0..80_000 {
+                let hcint = self.read(HCINT0);
+                if (hcint & HCINT_XFERCOMP) != 0 {
+                    return Ok(self.copy_dma_in(want, dst));
+                }
+                if (hcint & HCINT_NYET) != 0 {
+                    self.halt_ch0();
+                    break;
+                }
+                if (hcint & HCINT_NAK) != 0 {
+                    self.halt_ch0();
+                    return Err(HCINT_NAK);
+                }
+                if (hcint & (HCINT_STALL | HCINT_XACTERR | HCINT_BBLERR | HCINT_DATATGLERR)) != 0 {
+                    self.halt_ch0();
+                    return Err(hcint);
+                }
+                if (hcint & HCINT_CHHLTD) != 0 {
+                    let received = self.copy_dma_in(want, dst);
+                    if received > 0 || want == 0 {
+                        return Ok(received);
+                    }
+                    return Err(hcint);
+                }
+                core::hint::spin_loop();
+            }
+            self.spin_delay(20_000);
+        }
+        self.halt_ch0();
         Err(0)
+    }
+
+    fn copy_dma_in(&self, want: usize, dst: &mut [u8]) -> usize {
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: Order DMA payload reads after hardware completion flag.
+        unsafe {
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
+        let rem = (self.read(HCTSIZ0) & 0x7_FFFF) as usize;
+        let received = want.saturating_sub(rem);
+        if received > 0 && !dst.is_empty() {
+            // SAFETY: `self.dma_va` holds `received <= dst.len()` DMA IN bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.dma_va as *const u8,
+                    dst.as_mut_ptr(),
+                    received,
+                );
+            }
+        }
+        received
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -557,19 +738,25 @@ impl Dwc2Host {
         {
             return false;
         }
-        self.spin_delay(20_000);
+        self.delay_ms(10);
 
         if dev_desc[4] == 0x09 {
             // USB Hub (e.g. Raspberry Pi 3B LAN9514 or multi-device QEMU hub):
-            // probe all 5+ downstream ports with distinct addresses `2..=6`.
-            // Note: Only High-Speed hubs (`root_hs`) use DWC2 Split (`HCSPLT.SpltEna`).
-            return self.probe_hub_ports(1, mps0, root_hs);
+            // probe all downstream ports with distinct addresses `2..=15`.
+            return self.probe_hub_ports(1, mps0, root_hs, 2, 1);
         }
 
         self.configure_hid_keyboard(1, mps0, root_ls, 0, 0)
     }
 
-    fn probe_hub_ports(&mut self, hub_addr: u8, hub_mps: u16, hub_is_hs: bool) -> bool {
+    fn probe_hub_ports(
+        &mut self,
+        hub_addr: u8,
+        hub_mps: u16,
+        hub_is_hs: bool,
+        mut next_addr: u8,
+        depth: u8,
+    ) -> bool {
         // SET_CONFIGURATION(1) on Hub
         if self
             .control_transfer(
@@ -586,7 +773,26 @@ impl Dwc2Host {
             return false;
         }
 
-        for port in 1..=6u8 {
+        let mut hub_desc = [0u8; 8];
+        let nbr_ports = if self
+            .control_transfer(
+                hub_addr,
+                hub_mps,
+                false,
+                0,
+                0,
+                [0xA0, 0x06, 0x00, 0x29, 0x00, 0x00, 8, 0x00],
+                Some(&mut hub_desc),
+            )
+            .is_ok()
+            && hub_desc[2] >= 1
+        {
+            hub_desc[2].min(7)
+        } else {
+            6
+        };
+
+        for port in 1..=nbr_ports {
             // SET_FEATURE(PORT_POWER = 8)
             let _ = self.control_transfer(
                 hub_addr,
@@ -598,10 +804,9 @@ impl Dwc2Host {
                 None,
             );
         }
-        self.spin_delay(120_000);
+        self.delay_ms(120);
 
-        let split_hub = if hub_is_hs { hub_addr } else { 0 };
-        for port in 1..=6u8 {
+        for port in 1..=nbr_ports {
             let mut pstat = [0u8; 4];
             if self
                 .control_transfer(
@@ -620,7 +825,16 @@ impl Dwc2Host {
             if (pstat[0] & 0x01) == 0 {
                 continue; // Not connected
             }
-            // SET_FEATURE(PORT_RESET = 4)
+            // Clear C_PORT_CONNECTION (16) and assert SET_FEATURE(PORT_RESET = 4)
+            let _ = self.control_transfer(
+                hub_addr,
+                hub_mps,
+                false,
+                0,
+                0,
+                [0x23, 0x01, 16, 0x00, port, 0x00, 0x00, 0x00],
+                None,
+            );
             let _ = self.control_transfer(
                 hub_addr,
                 hub_mps,
@@ -630,17 +844,39 @@ impl Dwc2Host {
                 [0x23, 0x03, 4, 0x00, port, 0x00, 0x00, 0x00],
                 None,
             );
-            self.spin_delay(120_000);
+            self.delay_ms(60);
+            // CLEAR_FEATURE(C_PORT_RESET = 20) per USB 2.0 hub spec
             let _ = self.control_transfer(
                 hub_addr,
                 hub_mps,
                 false,
                 0,
                 0,
-                [0xA3, 0x00, 0x00, 0x00, port, 0x00, 4, 0x00],
-                Some(&mut pstat),
+                [0x23, 0x01, 20, 0x00, port, 0x00, 0x00, 0x00],
+                None,
             );
+            self.delay_ms(15);
+
+            if self
+                .control_transfer(
+                    hub_addr,
+                    hub_mps,
+                    false,
+                    0,
+                    0,
+                    [0xA3, 0x00, 0x00, 0x00, port, 0x00, 4, 0x00],
+                    Some(&mut pstat),
+                )
+                .is_err()
+                || (pstat[0] & 0x03) != 0x03
+            {
+                continue; // Port not connected & enabled
+            }
+
             let is_ls = (pstat[1] & 0x02) != 0;
+            let is_hs = (pstat[1] & 0x04) != 0;
+            // Only FS/LS children behind a High-Speed hub use DWC2 Split Transactions (`HCSPLT`).
+            let split_hub = if hub_is_hs && !is_hs { hub_addr } else { 0 };
 
             let mut ddesc = [0u8; 8];
             if self
@@ -655,7 +891,8 @@ impl Dwc2Host {
                 )
                 .is_ok()
             {
-                let child_addr = 1 + port;
+                let child_addr = next_addr;
+                next_addr = next_addr.saturating_add(1);
                 let child_mps = u16::from(ddesc[7]).max(8);
                 if self
                     .control_transfer(
@@ -668,9 +905,18 @@ impl Dwc2Host {
                         None,
                     )
                     .is_ok()
-                    && self.configure_hid_keyboard(child_addr, child_mps, is_ls, split_hub, port)
                 {
-                    return true;
+                    self.delay_ms(5);
+                    if ddesc[4] == 0x09
+                        && depth < 2
+                        && split_hub == 0
+                        && self.probe_hub_ports(child_addr, child_mps, is_hs, next_addr, depth + 1)
+                    {
+                        return true;
+                    }
+                    if self.configure_hid_keyboard(child_addr, child_mps, is_ls, split_hub, port) {
+                        return true;
+                    }
                 }
             }
         }
@@ -685,24 +931,28 @@ impl Dwc2Host {
         hub_addr: u8,
         hub_port: u8,
     ) -> bool {
-        let mut cfg = [0u8; 64];
+        let mut cfg = [0u8; 256];
         let Ok(cfg_len) = self.control_transfer(
             dev_addr,
             ep0_mps,
             low_speed,
             hub_addr,
             hub_port,
-            [0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 64, 0x00],
+            [0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01],
             Some(&mut cfg),
         ) else {
             return false;
         };
 
         let mut config_val = 1u8;
+        let mut best_rank = 0u8;
         let mut kbd_iface = None;
         let mut intr_ep = None;
         let mut intr_mps = 8u16;
-        let mut in_kbd_iface = false;
+
+        let mut cur_iface = 0u8;
+        let mut cur_rank = 0u8;
+        let mut cur_ep: Option<(u8, u16)> = None;
 
         let mut i = 0usize;
         while i + 2 <= cfg_len {
@@ -714,24 +964,48 @@ impl Dwc2Host {
             if dtype == 2 && dlen >= 6 {
                 config_val = cfg[i + 5];
             } else if dtype == 4 && dlen >= 9 {
-                // Interface: Class=3 (HID), Protocol=1 (Keyboard) (also accept Class=3 Sub=1)
-                let class = cfg[i + 5];
-                let proto = cfg[i + 7];
-                if class == 3 && (proto == 1 || kbd_iface.is_none()) {
-                    kbd_iface = Some(cfg[i + 2]);
-                    in_kbd_iface = true;
-                } else {
-                    in_kbd_iface = false;
+                // Save best matched interface from previous block
+                if cur_rank > best_rank
+                    && let Some((ep, mps)) = cur_ep
+                {
+                    best_rank = cur_rank;
+                    kbd_iface = Some(cur_iface);
+                    intr_ep = Some(ep);
+                    intr_mps = mps;
                 }
-            } else if dtype == 5 && dlen >= 7 && in_kbd_iface {
+                cur_iface = cfg[i + 2];
+                cur_ep = None;
+                let class = cfg[i + 5];
+                let sub = cfg[i + 6];
+                let proto = cfg[i + 7];
+                // Rank 3 = exact HID Boot Keyboard, Rank 2 = HID Keyboard proto, Rank 1 = generic HID
+                cur_rank = if class == 3 && sub == 1 && proto == 1 {
+                    3
+                } else if class == 3 && proto == 1 {
+                    2
+                } else if class == 3 {
+                    1
+                } else {
+                    0
+                };
+            } else if dtype == 5 && dlen >= 7 && cur_rank > 0 && cur_ep.is_none() {
                 let ep_addr = cfg[i + 2];
                 let attrs = cfg[i + 3];
-                if (ep_addr & 0x80) != 0 && (attrs & 0x03) == 3 && intr_ep.is_none() {
-                    intr_ep = Some(ep_addr & 0x0F);
-                    intr_mps = u16::from_le_bytes([cfg[i + 4], cfg[i + 5]]).clamp(8, 64);
+                if (ep_addr & 0x80) != 0 && (attrs & 0x03) == 3 {
+                    cur_ep = Some((
+                        ep_addr & 0x0F,
+                        u16::from_le_bytes([cfg[i + 4], cfg[i + 5]]).clamp(8, 64),
+                    ));
                 }
             }
             i += dlen;
+        }
+        if cur_rank > best_rank
+            && let Some((ep, mps)) = cur_ep
+        {
+            kbd_iface = Some(cur_iface);
+            intr_ep = Some(ep);
+            intr_mps = mps;
         }
 
         let (Some(iface_num), Some(ep_num)) = (kbd_iface, intr_ep) else {
@@ -785,7 +1059,7 @@ impl Dwc2Host {
         let Some(mut target) = self.kbd else {
             return;
         };
-        let mut report = [0u8; 8];
+        let mut report = [0u8; 64];
         match self.xfer_in(
             target.addr,
             target.intr_ep,
@@ -795,7 +1069,7 @@ impl Dwc2Host {
             target.hub_addr,
             target.hub_port,
             target.data_pid,
-            &mut report[..usize::from(target.max_pkt).min(8)],
+            &mut report[..usize::from(target.max_pkt).clamp(8, 64)],
         ) {
             Ok(n) if n >= 3 => {
                 target.data_pid = if target.data_pid == PID_DATA0 {
@@ -804,8 +1078,10 @@ impl Dwc2Host {
                     PID_DATA0
                 };
                 self.kbd = Some(target);
-                self.decode_hid_report(&report, queue);
-                self.prev_report = report;
+                let mut rep8 = [0u8; 8];
+                rep8.copy_from_slice(&report[..8]);
+                self.decode_hid_report(&rep8, queue);
+                self.prev_report = rep8;
             }
             Ok(_) => {}
             Err(hcint) if (hcint & HCINT_DATATGLERR) != 0 => {
@@ -953,7 +1229,7 @@ fn delta_main() -> usize {
     }
 
     let mut msg = IpcMessage::new(0);
-    let mut idle_reprobe = 0u32;
+    let mut last_reprobe_ms = Dwc2Host::now_ms();
     loop {
         if libdelta::port_recv(port, &mut msg).is_ok() {
             match msg.tag {
@@ -961,9 +1237,9 @@ fn delta_main() -> usize {
                     if host.kbd.is_some() {
                         host.poll_keyboard(&mut queue);
                     } else {
-                        idle_reprobe += 1;
-                        if idle_reprobe >= 48 {
-                            idle_reprobe = 0;
+                        let now = Dwc2Host::now_ms();
+                        if now.saturating_sub(last_reprobe_ms) >= 2000 {
+                            last_reprobe_ms = now;
                             if host.probe_and_bind_keyboard() {
                                 libdelta::print("[el0/drv-kbd] USB HID Keyboard attached!\n");
                             }
