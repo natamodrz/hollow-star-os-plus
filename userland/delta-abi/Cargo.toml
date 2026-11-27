@@ -1,0 +1,6 @@
+[package]
+name = "delta-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared syscall numbers, error codes, and IPC ABI between Delta Kernel and EL0 userland"

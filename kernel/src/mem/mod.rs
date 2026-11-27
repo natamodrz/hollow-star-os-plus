@@ -3,14 +3,11 @@
 pub mod pmm;
 
 use core::ptr::addr_of;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal_core::PhysAddr;
 
 /// Higher-half direct physical map base in `TTBR1_EL1` (48-bit VA split).
 pub const HIGHER_HALF_OFFSET: usize = 0xFFFF_0000_0000_0000;
-
-static HIGHER_HALF_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" {
     static __kernel_start: u8;
@@ -22,7 +19,7 @@ unsafe extern "C" {
     static __kernel_end: u8;
 }
 
-/// Page-aligned physical section boundaries exported by the board linker script.
+/// Page-aligned physical section boundaries of the running kernel image.
 #[derive(Debug, Clone, Copy)]
 pub struct KernelLayout {
     pub kernel_start: usize,
@@ -35,38 +32,35 @@ pub struct KernelLayout {
 }
 
 impl KernelLayout {
-    /// Reads the linker-defined physical boundaries of the running kernel image.
+    /// Reads the linker-defined virtual boundaries and converts them to physical addresses.
     pub fn from_linker() -> Self {
         Self {
-            kernel_start: addr_of!(__kernel_start) as usize,
-            text_start: addr_of!(__text_start) as usize,
-            text_end: addr_of!(__text_end) as usize,
-            rodata_start: addr_of!(__rodata_start) as usize,
-            rodata_end: addr_of!(__rodata_end) as usize,
-            rw_start: addr_of!(__rw_start) as usize,
-            kernel_end: addr_of!(__kernel_end) as usize,
+            kernel_start: virt_to_phys_const(addr_of!(__kernel_start) as usize),
+            text_start: virt_to_phys_const(addr_of!(__text_start) as usize),
+            text_end: virt_to_phys_const(addr_of!(__text_end) as usize),
+            rodata_start: virt_to_phys_const(addr_of!(__rodata_start) as usize),
+            rodata_end: virt_to_phys_const(addr_of!(__rodata_end) as usize),
+            rw_start: virt_to_phys_const(addr_of!(__rw_start) as usize),
+            kernel_end: virt_to_phys_const(addr_of!(__kernel_end) as usize),
         }
     }
 }
 
-/// Marks the higher-half direct map (`TTBR1_EL1`) as active for [`phys_to_virt`].
-pub fn mark_higher_half_active() {
-    HIGHER_HALF_ACTIVE.store(true, Ordering::Release);
+const fn virt_to_phys_const(va: usize) -> usize {
+    va.saturating_sub(HIGHER_HALF_OFFSET)
 }
 
-/// Converts a physical RAM address to an accessible virtual address.
-///
-/// Uses identity mapping prior to MMU activation and the `TTBR1_EL1` higher-half
-/// alias afterwards.
-pub fn phys_to_virt(pa: PhysAddr) -> usize {
-    if HIGHER_HALF_ACTIVE.load(Ordering::Acquire) {
-        HIGHER_HALF_OFFSET.saturating_add(pa.as_usize())
-    } else {
-        pa.as_usize()
-    }
+/// Converts a physical RAM address to its `TTBR1_EL1` higher-half virtual address.
+pub const fn phys_to_virt(pa: PhysAddr) -> usize {
+    HIGHER_HALF_OFFSET.saturating_add(pa.as_usize())
 }
 
-/// Converts a physical RAM address into a typed mutable pointer.
-pub fn phys_to_mut_ptr<T>(pa: PhysAddr) -> *mut T {
+/// Converts a higher-half kernel virtual address back to a physical address.
+pub const fn virt_to_phys(va: usize) -> PhysAddr {
+    PhysAddr(va.saturating_sub(HIGHER_HALF_OFFSET))
+}
+
+/// Converts a physical RAM address into a typed mutable pointer in higher-half space.
+pub const fn phys_to_mut_ptr<T>(pa: PhysAddr) -> *mut T {
     phys_to_virt(pa) as *mut T
 }

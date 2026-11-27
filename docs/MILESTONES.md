@@ -13,8 +13,8 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 | **M1** | Boot & Serial | Ukończony | Zejście `EL2 -> EL1`, BSS, `hal-core` + `board-raspi3b`, baner UART, parser DTB |
 | **M2** | Memory & Exceptions | Ukończony | Wektory wyjątków `VBAR_EL1`, ARM Generic Timer IRQ, PMM (4 KiB), MMU (`TTBR0`/`TTBR1`) |
 | **M3** | Delta Scheduler & SMP | Ukończony | Przełączanie kontekstu AArch64, wielowątkowość na 4 rdzeniach Cortex-A53, priorytety `1..=120` + RT |
-| **M4** | EL0 & IPC | Następny etap | Przestrzeń użytkownika `EL0`, ABI `svc`, porty IPC z capabilities, `init` + `drv-uart` |
-| **M5** | Storage & VFS | Planowany | Serwer SD/eMMC (`drv-sd`), VFS w EL0, FAT32 / ext2, ładowanie plików ELF |
+| **M4** | EL0 & IPC | Ukończony | Higher-half `TTBR1`, izolowane `TTBR0` ELF64, ABI `svc #0`, porty IPC + PI, `init` + `drv-uart` |
+| **M5** | Storage & VFS | Następny etap | Serwer SD/eMMC (`drv-sd`), IRQ forwarding, VFS w EL0, FAT32 / ext2, ładowanie ELF/`.hsapp` |
 | **M6** | Multimedia & UI | Planowany | Kompozytor Framebuffer/HDMI (`drv-fb`), audio RT (`drv-audio`), `1st Setup`, `EN/PL`, aplikacje |
 
 ---
@@ -52,13 +52,14 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 
 ---
 
-### M4 — EL0 & IPC
+### M4 — EL0 & IPC *(Ukończony)*
 - **Zakres:**
-  - Przejście do trybu użytkownika **EL0** (`eret` z izolowanym `TTBR0_EL1` na proces) oraz obsługa wywołań systemowych (`svc #0`).
-  - Porty IPC oparte na capabilities (tworzenie portu, wysyłanie/odbieranie komunikatów synchronicznych i asynchronicznych, dziedziczenie priorytetów przy blokowaniu na IPC).
-  - Przekazywanie przerwań sprzętowych (IRQ forwarding) do serwerów sterowników w EL0.
-  - Pierwsze procesy przestrzeni użytkownika: `userland/libdelta`, `userland/init`, `drivers/drv-uart` obsługujący konsolę przez IPC zamiast bezpośrednich zapisów z jądra.
-- **Kryterium akceptacji:** `init` w EL0 wysyła powitanie przez serwer `drv-uart` przy użyciu portów IPC w QEMU `raspi3b`.
+  - Przeniesienie całego jądra do wyższej połówki `TTBR1_EL1` (`0xFFFF_0000_0008_0000+`), pozostawiając `TTBR0_EL1` wyłącznie dla izolowanych procesów EL0 (`PXN=1`).
+  - Loader binarnych plików **ELF64 AArch64** (`kernel/src/proc/elf.rs`), zapis/odtwarzanie `SP_EL0`, bezpieczne zejście `enter_usermode` (`eret` do `EL0t`) oraz walidowane kopiowanie pamięci `copy_from_user` / `copy_to_user`.
+  - Współdzielone ABI (`userland/delta-abi`, `userland/libdelta`) oraz obsługa wywołań systemowych (`svc #0`, `EC=0x15`).
+  - Porty IPC oparte na capabilities (`PortCreate`, `PortSend`, `PortRecv`, `PortCall`, `PortReply`, `ServiceRegister`, `ServiceLookup`) z jednorazową capability odpowiedzi i Priority Inheritance.
+  - Pierwsze procesy EL0: serwer `drivers/drv-uart` z odizolowanym mapowaniem 4 KiB UART MMIO oraz `userland/init` wysyłający komunikaty przez IPC `svc.uart`.
+- **Kryterium akceptacji:** zaliczone `./delta.sh ci` oraz start `drv-uart` (`pid=1`) i `init` (`pid=2`) w EL0 pod QEMU `raspi3b` z potwierdzonym synchronicznym ACK przez IPC i czystym wyjściem `init` (`exited=0`).
 
 ---
 

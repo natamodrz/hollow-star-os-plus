@@ -1,9 +1,9 @@
-//! AArch64 thread CPU context representation and switching helpers.
+//! AArch64 thread CPU context representation, switching, and EL0 drop helpers.
 
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(include_str!("context.S"));
 
-/// Saved AArch64 callee-saved registers and stack pointer for kernel context switching.
+/// Saved AArch64 callee-saved registers, EL1 SP, and EL0 `SP_EL0` for context switching.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 pub struct CpuContext {
@@ -20,7 +20,7 @@ pub struct CpuContext {
     pub x29: u64,
     pub x30: u64,
     pub sp: u64,
-    _pad: u64,
+    pub sp_el0: u64,
 }
 
 const _: () = assert!(core::mem::size_of::<CpuContext>() == 112);
@@ -42,12 +42,11 @@ impl CpuContext {
             x29: 0,
             x30: 0,
             sp: 0,
-            _pad: 0,
+            sp_el0: 0,
         }
     }
 
-    /// Initializes a [`CpuContext`] for a fresh kernel thread entering `entry(arg)`
-    /// on `stack_top`.
+    /// Initializes a [`CpuContext`] for a fresh thread entering `entry(arg)` on `stack_top`.
     pub fn init_thread(entry: fn(usize), arg: usize, stack_top: usize) -> Self {
         let mut ctx = Self::empty();
         ctx.x19 = entry as usize as u64;
@@ -70,4 +69,12 @@ unsafe extern "C" {
     ///   by any other core.
     /// - Local IRQs (`DAIF.I`) must be masked across the switch.
     pub fn switch_context(prev: *mut CpuContext, next: *const CpuContext);
+
+    /// Drops the current thread from EL1 to EL0 (`EL0t`) at `entry_pc` with `user_sp`.
+    ///
+    /// # Safety
+    ///
+    /// Caller must have loaded a valid user `TTBR0_EL1` page table mapping `entry_pc`
+    /// (`Code`) and the stack region below `user_sp` (`RwData`).
+    pub fn enter_usermode(entry_pc: usize, user_sp: usize) -> !;
 }

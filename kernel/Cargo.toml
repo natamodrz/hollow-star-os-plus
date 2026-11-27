@@ -16,5 +16,6 @@ board-raspi3b = ["dep:board-raspi3b"]
 mini-uart = ["board-raspi3b?/mini-uart"]
 
 [dependencies]
+delta-abi = { path = "../userland/delta-abi" }
 hal-core = { path = "../hal/hal-core" }
 board-raspi3b = { path = "../hal/board-raspi3b", optional = true }

@@ -25,7 +25,8 @@ hollow-star-os-plus/
 │   └── drv-audio/
 ├── fs/                       # VFS + sterowniki systemów plików (FAT32, ext2) w userlandzie
 ├── userland/
-│   ├── libdelta/             # Syscalle, IPC, wątki, interfejs POSIX/Unix-like
-│   ├── init/                 # Pierwszy proces uruchamiający serwery systemowe
+│   ├── delta-abi/            # Współdzielone numery syscalli, błędy i struktury IPC (no_std)
+│   ├── libdelta/             # Syscalle (svc #0), IPC, CRT0 _start, przyszły interfejs POSIX
+│   ├── init/                 # Pierwszy proces EL0 uruchamiający serwery systemowe
 │   └── shell/                # Interaktywna powłoka Unix-like
 └── apps/                     # Aplikacje w paczkach <App>.hsapp/ (Assets/, exec [ELF], icon.png)

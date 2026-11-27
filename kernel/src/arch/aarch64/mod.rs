@@ -31,19 +31,6 @@ pub fn core_id() -> u8 {
     (mpidr & 0xFF) as u8
 }
 
-/// Cleans the data cache line containing `addr` to the Point of Coherency (`dc cvac`).
-pub fn clean_dcache_line(addr: usize) {
-    // SAFETY: `dc cvac` cleans the cache line at `addr` to DRAM PoC without altering contents.
-    unsafe {
-        asm!(
-            "dc cvac, {0}",
-            "dsb sy",
-            in(reg) addr,
-            options(nostack)
-        );
-    }
-}
-
 /// Enables maskable IRQ interrupts on the current CPU core (`DAIF.I = 0`).
 pub fn enable_irqs() {
     // SAFETY: Vector table (`VBAR_EL1`) and interrupt controller are initialized before unmasking.

@@ -4,6 +4,8 @@
 
 use hal_core::{Board, InterruptController, SerialConsole, Timer};
 
+use crate::mem::HIGHER_HALF_OFFSET;
+
 #[cfg(not(feature = "board-raspi3b"))]
 compile_error!("Enable a board feature (e.g. `board-raspi3b`) to build Delta Kernel.");
 
@@ -11,7 +13,7 @@ compile_error!("Enable a board feature (e.g. `board-raspi3b`) to build Delta Ker
 pub fn init() -> impl Board {
     #[cfg(feature = "board-raspi3b")]
     {
-        board_raspi3b::Raspi3bBoard::init()
+        board_raspi3b::Raspi3bBoard::init(HIGHER_HALF_OFFSET)
     }
 }
 

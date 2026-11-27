@@ -14,7 +14,8 @@ pub mod uart_mini;
 pub mod uart_pl011;
 
 use hal_core::{
-    Board, BoardInfo, InterruptController, MemoryKind, MemoryRegion, SerialConsole, SmpError,
+    Board, BoardInfo, InterruptController, MemoryKind, MemoryRegion, PAGE_SIZE, SerialConsole,
+    SmpError,
 };
 
 /// BCM2837 peripheral MMIO physical base address on Raspberry Pi 3B.
@@ -73,8 +74,11 @@ pub struct Raspi3bBoard {
 }
 
 impl Raspi3bBoard {
-    /// Initializes early board peripherals (UART and interrupt controller) and returns the board handle.
-    pub fn init() -> Self {
+    /// Initializes early board peripherals (UART and interrupt controller) using
+    /// `mmio_virt_offset` (`0` for identity mapping, `0xFFFF_0000_0000_0000` for higher-half).
+    pub fn init(mmio_virt_offset: usize) -> Self {
+        mmio::set_mmio_virt_offset(mmio_virt_offset);
+
         let mut console = ActiveConsole::new();
         console.init();
 
@@ -136,29 +140,39 @@ impl Board for Raspi3bBoard {
         &RASPI3B_MEMORY_REGIONS
     }
 
+    fn uart_mmio_region(&self) -> MemoryRegion {
+        #[cfg(not(feature = "mini-uart"))]
+        {
+            MemoryRegion::new(PL011_UART0_BASE, PAGE_SIZE, MemoryKind::DeviceMmio)
+        }
+        #[cfg(feature = "mini-uart")]
+        {
+            MemoryRegion::new(AUX_BASE, PAGE_SIZE, MemoryKind::DeviceMmio)
+        }
+    }
+
     fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError> {
         if core_id == 0 || core_id >= 4 {
             return Err(SmpError::InvalidCore);
         }
 
-        let mailbox_addr = SPIN_TABLE_BASE + core_id * core::mem::size_of::<u64>();
+        let mailbox_virt = 0xFFFF_0000_0000_0000usize + SPIN_TABLE_BASE + core_id * 8;
         #[cfg(target_arch = "aarch64")]
-        // SAFETY: `mailbox_addr` (`0xE0`/`0xE8`/`0xF0`) is the BCM2837 AArch64 firmware
-        // spin-table slot for secondary core `core_id`, mapped RW in page 0. Flushing
-        // the cache line (`dc civac`) and issuing `dsb sy` + `sev` ensures sleeping cores
-        // with MMU disabled observe `entry_phys` in DRAM and wake up.
+        // SAFETY: `mailbox_virt` maps BCM2837 AArch64 firmware spin-table slot
+        // (`0xE0`/`0xE8`/`0xF0`) in page 0 via `TTBR1_EL1`. Cleaning cache to PoC
+        // (`dc civac`) + `dsb sy` + `sev` ensures sleeping EL2 cores observe `entry_phys`.
         unsafe {
-            core::ptr::write_volatile(mailbox_addr as *mut u64, entry_phys as u64);
+            core::ptr::write_volatile(mailbox_virt as *mut u64, entry_phys as u64);
             core::arch::asm!(
                 "dc civac, {addr}",
                 "dsb sy",
                 "sev",
-                addr = in(reg) mailbox_addr,
+                addr = in(reg) mailbox_virt,
                 options(nostack)
             );
         }
         #[cfg(not(target_arch = "aarch64"))]
-        let _ = (mailbox_addr, entry_phys);
+        let _ = (mailbox_virt, entry_phys);
 
         Ok(())
     }

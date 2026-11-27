@@ -1,5 +1,5 @@
-//! AArch64 4-level (4 KiB granule) MMU setup for identity (`TTBR0_EL1`) and
-//! higher-half (`TTBR1_EL1`) kernel paging with W^X section permissions.
+//! AArch64 4-level (4 KiB granule) MMU setup for higher-half kernel (`TTBR1_EL1`)
+//! and isolated per-process EL0 address spaces (`TTBR0_EL1`) with W^X enforcement.
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -8,14 +8,13 @@ use hal_core::{
     MemoryKind, MemoryRegion, PAGE_SIZE, PhysAddr, VirtAddr, mem::align_down, mem::align_up,
 };
 
-use crate::arch;
-use crate::mem::{HIGHER_HALF_OFFSET, KernelLayout, mark_higher_half_active, phys_to_mut_ptr, pmm};
-
-static BOOT_TTBR0_ROOT: AtomicUsize = AtomicUsize::new(0);
-static BOOT_TTBR1_ROOT: AtomicUsize = AtomicUsize::new(0);
+use crate::mem::{HIGHER_HALF_OFFSET, KernelLayout, phys_to_mut_ptr, pmm};
 
 const BLOCK_2M: usize = 2 * 1024 * 1024;
 const ENTRIES_PER_TABLE: usize = 512;
+
+/// Upper bound of lower-half EL0 virtual address space (`TTBR0_EL1`).
+pub const USER_VA_LIMIT: usize = 0x0000_8000_0000_0000;
 
 const DESC_VALID: u64 = 1 << 0;
 const DESC_TABLE: u64 = 1 << 1;
@@ -25,19 +24,26 @@ const DESC_BLOCK: u64 = 0 << 1;
 const ATTR_NORMAL: u64 = 0 << 2;
 const ATTR_DEVICE: u64 = 1 << 2;
 
-const AP_EL1_RW: u64 = 0b00 << 6;
-const AP_EL1_RO: u64 = 0b10 << 6;
+const AP_SHIFT: usize = 6;
+const AP_EL1_RW: u64 = 0b00 << AP_SHIFT;
+const AP_EL0_RW: u64 = 0b01 << AP_SHIFT;
+const AP_EL1_RO: u64 = 0b10 << AP_SHIFT;
+const AP_EL0_RO: u64 = 0b11 << AP_SHIFT;
 
 const SH_NON_SHAREABLE: u64 = 0b00 << 8;
 const SH_INNER_SHAREABLE: u64 = 0b11 << 8;
 
 const AF: u64 = 1 << 10;
+const NG: u64 = 1 << 11;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
 
 const PA_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
-/// Memory and access attributes for virtual page mappings.
+static KERNEL_TTBR0_IDLE: AtomicUsize = AtomicUsize::new(0);
+static KERNEL_TTBR1_ROOT: AtomicUsize = AtomicUsize::new(0);
+
+/// Memory and access attributes for kernel (`TTBR1_EL1`) page mappings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageAttrs {
     /// Executable, read-only kernel code (`.text`).
@@ -61,15 +67,42 @@ impl PageAttrs {
     }
 }
 
+/// Memory and access attributes for EL0 userspace (`TTBR0_EL1`) 4 KiB pages.
+///
+/// Note that `PXN` is always set on all user pages so EL1 never executes EL0 code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserPageAttrs {
+    /// Read-only, executable user code (`PF_R | PF_X`).
+    Code,
+    /// Read-only, non-executable user constants (`PF_R`).
+    RoData,
+    /// Read-write, non-executable user data/stack (`PF_R | PF_W`).
+    RwData,
+    /// Read-write, non-executable `Device-nGnRnE` MMIO mapped to a driver server.
+    DeviceMmio,
+}
+
+impl UserPageAttrs {
+    const fn descriptor_bits(self) -> u64 {
+        match self {
+            Self::Code => ATTR_NORMAL | AP_EL0_RO | SH_INNER_SHAREABLE | AF | NG | PXN,
+            Self::RoData => ATTR_NORMAL | AP_EL0_RO | SH_INNER_SHAREABLE | AF | NG | PXN | UXN,
+            Self::RwData => ATTR_NORMAL | AP_EL0_RW | SH_INNER_SHAREABLE | AF | NG | PXN | UXN,
+            Self::DeviceMmio => ATTR_DEVICE | AP_EL0_RW | SH_NON_SHAREABLE | AF | NG | PXN | UXN,
+        }
+    }
+}
+
 /// Errors returned while constructing or querying page tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmuError {
     OutOfFrames,
     UnalignedAddress,
     DescriptorConflict,
+    InvalidUserAddress,
 }
 
-/// Active kernel page-table roots (`TTBR0_EL1` identity + `TTBR1_EL1` higher-half).
+/// Active kernel page-table roots (`TTBR0_EL1` empty idle + `TTBR1_EL1` higher-half kernel).
 #[derive(Debug, Clone, Copy)]
 pub struct MmuConfig {
     pub ttbr0_root: PhysAddr,
@@ -89,13 +122,14 @@ struct MapCounters {
     blocks_2m: usize,
 }
 
-/// Builds identity (`TTBR0_EL1`) and higher-half (`TTBR1_EL1`) page tables and enables the MMU.
+/// Builds the full W^X higher-half (`TTBR1_EL1`) page table + empty kernel-idle `TTBR0_EL1`,
+/// replacing the temporary boot tables created in `boot.S`.
 pub fn init(
     regions: &[MemoryRegion],
     dtb_ram: Option<(u64, u64)>,
     layout: &KernelLayout,
 ) -> Result<MmuConfig, MmuError> {
-    let ttbr0_root = pmm::alloc_zeroed_frame().ok_or(MmuError::OutOfFrames)?;
+    let ttbr0_idle = pmm::alloc_zeroed_frame().ok_or(MmuError::OutOfFrames)?;
     let ttbr1_root = pmm::alloc_zeroed_frame().ok_or(MmuError::OutOfFrames)?;
     let mut counters = MapCounters::default();
 
@@ -104,8 +138,7 @@ pub fn init(
     // Map page 0 (`0x0..0x1000`) RW+XN for firmware SMP spin-table mailboxes (`0xE0/0xE8/0xF0`),
     // and `[0x1000..kernel_start)` RO+XN so ATAGs/DTB remain readable without accidental writes.
     if layout.kernel_start >= PAGE_SIZE {
-        map_dual_range(
-            ttbr0_root,
+        map_higher_half_range(
             ttbr1_root,
             0,
             PAGE_SIZE,
@@ -113,8 +146,7 @@ pub fn init(
             &mut counters,
         )?;
         if layout.kernel_start > PAGE_SIZE {
-            map_dual_range(
-                ttbr0_root,
+            map_higher_half_range(
                 ttbr1_root,
                 PAGE_SIZE,
                 layout.kernel_start - PAGE_SIZE,
@@ -124,25 +156,22 @@ pub fn init(
         }
     }
 
-    // Map Delta Kernel sections with strict 4 KiB W^X boundaries.
-    map_dual_range(
-        ttbr0_root,
+    // Map Delta Kernel sections with strict 4 KiB W^X boundaries in TTBR1_EL1.
+    map_higher_half_range(
         ttbr1_root,
         layout.text_start,
         layout.text_end.saturating_sub(layout.text_start),
         PageAttrs::KernelText,
         &mut counters,
     )?;
-    map_dual_range(
-        ttbr0_root,
+    map_higher_half_range(
         ttbr1_root,
         layout.rodata_start,
         layout.rodata_end.saturating_sub(layout.rodata_start),
         PageAttrs::KernelRoData,
         &mut counters,
     )?;
-    map_dual_range(
-        ttbr0_root,
+    map_higher_half_range(
         ttbr1_root,
         layout.rw_start,
         layout.kernel_end.saturating_sub(layout.rw_start),
@@ -150,7 +179,7 @@ pub fn init(
         &mut counters,
     )?;
 
-    // Map remaining usable physical RAM and all board Device MMIO regions.
+    // Map remaining usable physical RAM and all board Device MMIO regions into TTBR1_EL1.
     for region in regions {
         match region.kind {
             MemoryKind::UsableRam => {
@@ -160,8 +189,7 @@ pub fn init(
                     end = end.min(align_down(ceiling, PAGE_SIZE));
                 }
                 if end > start {
-                    map_dual_range(
-                        ttbr0_root,
+                    map_higher_half_range(
                         ttbr1_root,
                         start,
                         end - start,
@@ -173,8 +201,7 @@ pub fn init(
             MemoryKind::DeviceMmio => {
                 let start = align_down(region.base, PAGE_SIZE);
                 let end = align_up(region.end(), PAGE_SIZE);
-                map_dual_range(
-                    ttbr0_root,
+                map_higher_half_range(
                     ttbr1_root,
                     start,
                     end.saturating_sub(start),
@@ -183,13 +210,10 @@ pub fn init(
                 )?;
             }
             MemoryKind::Reserved => {
-                // Low reserved range before `kernel_start` is already mapped above;
-                // map any extra board reserved slices conservatively as RO+XN.
                 if region.base >= layout.kernel_end {
                     let start = align_down(region.base, PAGE_SIZE);
                     let end = align_up(region.end(), PAGE_SIZE);
-                    map_dual_range(
-                        ttbr0_root,
+                    map_higher_half_range(
                         ttbr1_root,
                         start,
                         end.saturating_sub(start),
@@ -201,41 +225,122 @@ pub fn init(
         }
     }
 
-    BOOT_TTBR0_ROOT.store(ttbr0_root.as_usize(), Ordering::Release);
-    BOOT_TTBR1_ROOT.store(ttbr1_root.as_usize(), Ordering::Release);
+    KERNEL_TTBR0_IDLE.store(ttbr0_idle.as_usize(), Ordering::Release);
+    KERNEL_TTBR1_ROOT.store(ttbr1_root.as_usize(), Ordering::Release);
 
-    // SAFETY: Both `ttbr0_root` and `ttbr1_root` are fully populated, valid 4 KiB-aligned
-    // L0 page-table hierarchies covering active code, stack, vectors, RAM, and MMIO.
+    // SAFETY: `ttbr1_root` maps all running EL1 code, stacks, vectors, RAM, and MMIO;
+    // switching `TTBR0_EL1` to `ttbr0_idle` removes lower-half kernel aliases cleanly.
     unsafe {
-        enable_mmu(ttbr0_root, ttbr1_root);
+        install_root_tables(ttbr0_idle, ttbr1_root);
     }
-    mark_higher_half_active();
-
-    // Flush root page-table pointers to DRAM PoC so secondary cores with MMU/caches off
-    // can read `BOOT_TTBR0_ROOT` and `BOOT_TTBR1_ROOT` reliably on wakeup.
-    arch::clean_dcache_line(&raw const BOOT_TTBR0_ROOT as usize);
-    arch::clean_dcache_line(&raw const BOOT_TTBR1_ROOT as usize);
 
     Ok(MmuConfig {
-        ttbr0_root,
+        ttbr0_root: ttbr0_idle,
         ttbr1_root,
         pages_mapped_4k: counters.pages_4k,
         blocks_mapped_2m: counters.blocks_2m,
     })
 }
 
-/// Enables the primary core's shared page tables on a newly woken secondary core.
+/// Installs the shared higher-half `TTBR1_EL1` and empty idle `TTBR0_EL1` on a secondary core.
 ///
 /// # Safety
 ///
-/// Must be called only on a secondary core in EL1 after [`init`] completed on Core 0.
+/// Must be called only on a secondary core executing in higher-half `TTBR1` after [`init`]
+/// completed on Core 0.
 pub unsafe fn enable_secondary() {
-    let ttbr0 = PhysAddr(BOOT_TTBR0_ROOT.load(Ordering::Acquire));
-    let ttbr1 = PhysAddr(BOOT_TTBR1_ROOT.load(Ordering::Acquire));
+    let ttbr0 = PhysAddr(KERNEL_TTBR0_IDLE.load(Ordering::Acquire));
+    let ttbr1 = PhysAddr(KERNEL_TTBR1_ROOT.load(Ordering::Acquire));
     debug_assert!(ttbr0.as_usize() != 0 && ttbr1.as_usize() != 0);
-    // SAFETY: Primary core initialized `ttbr0`/`ttbr1` and flushed them to DRAM PoC.
+    // SAFETY: Core 0 initialized both root tables before waking secondary cores.
     unsafe {
-        enable_mmu(ttbr0, ttbr1);
+        install_root_tables(ttbr0, ttbr1);
+    }
+}
+
+/// Returns the physical address of the empty kernel-idle `TTBR0_EL1` table.
+pub fn kernel_idle_ttbr0() -> PhysAddr {
+    PhysAddr(KERNEL_TTBR0_IDLE.load(Ordering::Acquire))
+}
+
+/// Allocates a fresh, empty `TTBR0_EL1` L0 root page table for an EL0 user process.
+pub fn create_user_l0() -> Result<PhysAddr, MmuError> {
+    pmm::alloc_zeroed_frame().ok_or(MmuError::OutOfFrames)
+}
+
+/// Maps a single 4 KiB page into an EL0 process's `TTBR0_EL1` table.
+pub fn map_user_page(
+    user_l0: PhysAddr,
+    va: VirtAddr,
+    pa: PhysAddr,
+    attrs: UserPageAttrs,
+) -> Result<(), MmuError> {
+    if va.as_usize() >= USER_VA_LIMIT || !va.is_page_aligned() || !pa.is_page_aligned() {
+        return Err(MmuError::InvalidUserAddress);
+    }
+    let l1_pa = ensure_table_entry(user_l0, va.l0_index())?;
+    let l2_pa = ensure_table_entry(l1_pa, va.l1_index())?;
+    let l3_pa = ensure_table_entry(l2_pa, va.l2_index())?;
+    let l3 = table_mut(l3_pa);
+    l3.entries[va.l3_index()] =
+        (pa.as_usize() as u64 & PA_MASK) | attrs.descriptor_bits() | DESC_PAGE | DESC_VALID;
+    Ok(())
+}
+
+/// Resolves an EL0 virtual address inside `user_l0` and returns `(pa, is_user_writable)`.
+pub fn translate_user_page(user_l0: PhysAddr, va: VirtAddr) -> Option<(PhysAddr, bool)> {
+    if va.as_usize() >= USER_VA_LIMIT {
+        return None;
+    }
+    let l0 = table_ref(user_l0);
+    let e0 = l0.entries[va.l0_index()];
+    if (e0 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return None;
+    }
+    let l1 = table_ref(PhysAddr((e0 & PA_MASK) as usize));
+    let e1 = l1.entries[va.l1_index()];
+    if (e1 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return None;
+    }
+    let l2 = table_ref(PhysAddr((e1 & PA_MASK) as usize));
+    let e2 = l2.entries[va.l2_index()];
+    if (e2 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return None;
+    }
+    let l3 = table_ref(PhysAddr((e2 & PA_MASK) as usize));
+    let e3 = l3.entries[va.l3_index()];
+    if (e3 & (DESC_VALID | DESC_PAGE)) != (DESC_VALID | DESC_PAGE) {
+        return None;
+    }
+    let ap = (e3 >> AP_SHIFT) & 0b11;
+    let user_accessible = (ap & 0b01) != 0;
+    if !user_accessible {
+        return None;
+    }
+    let writable = ap == 0b01;
+    let pa = PhysAddr(((e3 & PA_MASK) as usize) | va.page_offset());
+    Some((pa, writable))
+}
+
+/// Switches the active `TTBR0_EL1` user address space on the current core and flushes local TLB.
+///
+/// # Safety
+///
+/// `ttbr0_root` must be a valid 4 KiB-aligned L0 page table frame (or [`kernel_idle_ttbr0`]).
+pub unsafe fn switch_ttbr0(ttbr0_root: PhysAddr) {
+    // SAFETY: Caller supplies a valid L0 table root; `tlbi vmalle1` ensures no stale EL0
+    // translations persist across address space switches.
+    unsafe {
+        asm!(
+            "msr ttbr0_el1, {ttbr0}",
+            "dsb ish",
+            "isb",
+            "tlbi vmalle1",
+            "dsb ish",
+            "isb",
+            ttbr0 = in(reg) ttbr0_root.as_usize() as u64,
+            options(nostack)
+        );
     }
 }
 
@@ -276,8 +381,7 @@ pub fn translate(root_l0: PhysAddr, va: VirtAddr) -> Option<PhysAddr> {
     Some(PhysAddr(base | va.page_offset()))
 }
 
-fn map_dual_range(
-    ttbr0_root: PhysAddr,
+fn map_higher_half_range(
     ttbr1_root: PhysAddr,
     phys_start: usize,
     size: usize,
@@ -287,14 +391,6 @@ fn map_dual_range(
     if size == 0 {
         return Ok(());
     }
-    map_range(
-        ttbr0_root,
-        VirtAddr(phys_start),
-        PhysAddr(phys_start),
-        size,
-        attrs,
-        counters,
-    )?;
     map_range(
         ttbr1_root,
         VirtAddr(HIGHER_HALF_OFFSET.saturating_add(phys_start)),
@@ -355,7 +451,6 @@ fn try_map_block_2m(
     let existing = l2.entries[idx];
 
     if (existing & DESC_VALID) != 0 {
-        // An existing L3 table covers part of this 2 MiB region; fall back to 4 KiB pages.
         return Ok(false);
     }
 
@@ -399,73 +494,32 @@ fn ensure_table_entry(table_pa: PhysAddr, index: usize) -> Result<PhysAddr, MmuE
 fn table_ref(pa: PhysAddr) -> &'static PageTable {
     let ptr = phys_to_mut_ptr::<PageTable>(pa);
     // SAFETY: `pa` points to a 4 KiB-aligned page table frame allocated by PMM and
-    // accessible through the active identity or higher-half kernel mapping.
+    // accessible through the active `TTBR1_EL1` higher-half physmap.
     unsafe { &*ptr }
 }
 
 fn table_mut(pa: PhysAddr) -> &'static mut PageTable {
     let ptr = phys_to_mut_ptr::<PageTable>(pa);
     // SAFETY: `pa` points to an exclusive 4 KiB-aligned page table frame during
-    // single-core MMU initialization.
+    // single-core or locked page-table updates.
     unsafe { &mut *ptr }
 }
 
-unsafe fn enable_mmu(ttbr0_root: PhysAddr, ttbr1_root: PhysAddr) {
-    // Attr0=0xFF (Normal WB/WA), Attr1=0x00 (Device-nGnRnE), Attr2=0x44 (Normal NC)
-    let mair: u64 = 0x0000_0000_0044_00FF;
-
-    let mmfr0: u64;
-    // SAFETY: Reading `ID_AA64MMFR0_EL1` at EL1 is read-only and returns supported PA range.
-    unsafe {
-        asm!("mrs {0}, id_aa64mmfr0_el1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
-    }
-    let ips = (mmfr0 & 0xF).min(5);
-
-    // 48-bit VA (T0SZ=16, T1SZ=16), 4 KiB granules (TG0=0b00, TG1=0b10), Inner Shareable WB/WA.
-    let tcr: u64 = 16
-        | (0b01 << 8)
-        | (0b01 << 10)
-        | (0b11 << 12)
-        | (16 << 16)
-        | (0b01 << 24)
-        | (0b01 << 26)
-        | (0b11 << 28)
-        | (0b10 << 30)
-        | (ips << 32);
-
-    let mut sctlr: u64;
-    // SAFETY: Reading `SCTLR_EL1` at EL1 is valid before enabling translation.
-    unsafe {
-        asm!("mrs {0}, sctlr_el1", out(reg) sctlr, options(nomem, nostack, preserves_flags));
-    }
-
-    // Enable MMU (M), Data Cache (C), Stack Alignment (SA/SA0), Instruction Cache (I);
-    // keep little-endian (EE=0, E0E=0) and per-page W^X (WXN=0).
-    sctlr |= (1 << 0) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 12);
-    sctlr &= !((1 << 19) | (1 << 24) | (1 << 25));
-
-    // SAFETY: Caller verified `ttbr0_root` identity-maps all running EL1 code/stack/MMIO
-    // and `ttbr1_root` maps the higher-half alias; barriers flush stale TLBs/I-cache
-    // around enabling `SCTLR_EL1.M`.
+unsafe fn install_root_tables(ttbr0_root: PhysAddr, ttbr1_root: PhysAddr) {
+    // SAFETY: Caller verified `ttbr1_root` maps all running EL1 code, stacks, vectors,
+    // RAM, and MMIO; TLB invalidation drops any stale boot translations.
     unsafe {
         asm!(
-            "msr mair_el1, {mair}",
-            "msr tcr_el1, {tcr}",
+            "dsb ishst",
             "msr ttbr0_el1, {ttbr0}",
             "msr ttbr1_el1, {ttbr1}",
-            "dsb ishst",
-            "isb",
-            "tlbi vmalle1",
-            "ic iallu",
             "dsb ish",
             "isb",
-            "msr sctlr_el1, {sctlr}",
+            "tlbi vmalle1",
+            "dsb ish",
             "isb",
-            mair = in(reg) mair,
-            tcr = in(reg) tcr,
             ttbr0 = in(reg) ttbr0_root.as_usize() as u64,
             ttbr1 = in(reg) ttbr1_root.as_usize() as u64,
-            sctlr = in(reg) sctlr,
             options(nostack)
         );
     }

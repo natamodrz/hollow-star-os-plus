@@ -1,4 +1,4 @@
-//! Preemptive SMP Delta Scheduler (BeOS-inspired priority queues).
+//! Preemptive SMP Delta Scheduler (BeOS-inspired priority queues + per-process TTBR0).
 
 pub mod priority;
 
@@ -8,6 +8,7 @@ use hal_core::{PAGE_SIZE, PhysAddr};
 
 use crate::arch;
 use crate::arch::context::{CpuContext, switch_context};
+use crate::arch::mmu;
 use crate::mem::{phys_to_virt, pmm};
 use crate::sync::IrqSpinLock;
 
@@ -15,14 +16,15 @@ pub use priority::Priority;
 
 pub const MAX_CORES: usize = 4;
 pub const MAX_THREADS: usize = 64;
-const STACK_PAGES_PER_THREAD: usize = 4; // 16 KiB kernel stack
+const STACK_PAGES_PER_THREAD: usize = 4; // 16 KiB EL1 kernel stack
 
-/// Lifecycle state of a kernel thread.
+/// Lifecycle state of a kernel or EL0 user thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadState {
     Unused,
     Ready,
     Running,
+    Blocked,
     Exited,
 }
 
@@ -30,7 +32,7 @@ pub enum ThreadState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
 
-/// Errors returned when spawning a kernel thread.
+/// Errors returned when spawning a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
     TableFull,
@@ -40,6 +42,7 @@ pub enum SpawnError {
 #[derive(Clone, Copy)]
 struct ThreadControlBlock {
     id: u64,
+    pid: u64,
     name: &'static str,
     state: ThreadState,
     base_priority: Priority,
@@ -49,6 +52,7 @@ struct ThreadControlBlock {
     enqueue_seq: u64,
     ticks_executed: u64,
     is_idle: bool,
+    ttbr0_root: PhysAddr,
     cpu_context: CpuContext,
     stack_base: Option<PhysAddr>,
 }
@@ -57,6 +61,7 @@ impl ThreadControlBlock {
     const fn unused() -> Self {
         Self {
             id: 0,
+            pid: 0,
             name: "",
             state: ThreadState::Unused,
             base_priority: Priority::IDLE,
@@ -66,6 +71,7 @@ impl ThreadControlBlock {
             enqueue_seq: 0,
             ticks_executed: 0,
             is_idle: false,
+            ttbr0_root: PhysAddr(0),
             cpu_context: CpuContext::empty(),
             stack_base: None,
         }
@@ -110,6 +116,7 @@ impl SchedulerState {
         self.next_id += 1;
         self.threads[slot] = ThreadControlBlock {
             id,
+            pid: 0,
             name,
             state: ThreadState::Running,
             base_priority: Priority::IDLE,
@@ -119,6 +126,7 @@ impl SchedulerState {
             enqueue_seq: 0,
             ticks_executed: 0,
             is_idle: true,
+            ttbr0_root: mmu::kernel_idle_ttbr0(),
             cpu_context: CpuContext::empty(),
             stack_base: None,
         };
@@ -171,7 +179,7 @@ impl SchedulerState {
                 && !prev.is_idle
                 && let Some(stack_phys) = prev.stack_base.take()
             {
-                // Reclaim exited thread stack now that `core` has switched off it.
+                // Reclaim exited thread kernel stack now that `core` has switched off it.
                 for i in 0..STACK_PAGES_PER_THREAD {
                     let _ = pmm::free_frame(PhysAddr(stack_phys.as_usize() + i * PAGE_SIZE));
                 }
@@ -212,9 +220,41 @@ pub fn register_secondary(core: usize) {
     }
 }
 
-/// Spawns a new kernel thread at `priority` (optionally pinned to `affinity`).
+/// Spawns a new EL1 kernel thread at `priority`.
 pub fn spawn(
     name: &'static str,
+    priority: Priority,
+    affinity: Option<u8>,
+    entry: fn(usize),
+    arg: usize,
+) -> Result<ThreadId, SpawnError> {
+    spawn_with_space(
+        name,
+        0,
+        mmu::kernel_idle_ttbr0(),
+        priority,
+        affinity,
+        entry,
+        arg,
+    )
+}
+
+/// Spawns a thread attached to an EL0 process (`pid` + `ttbr0_root`).
+pub fn spawn_user(
+    name: &'static str,
+    pid: u64,
+    ttbr0_root: PhysAddr,
+    priority: Priority,
+    entry: fn(usize),
+    arg: usize,
+) -> Result<ThreadId, SpawnError> {
+    spawn_with_space(name, pid, ttbr0_root, priority, None, entry, arg)
+}
+
+fn spawn_with_space(
+    name: &'static str,
+    pid: u64,
+    ttbr0_root: PhysAddr,
     priority: Priority,
     affinity: Option<u8>,
     entry: fn(usize),
@@ -242,6 +282,7 @@ pub fn spawn(
 
         sched.threads[slot] = ThreadControlBlock {
             id,
+            pid,
             name,
             state: ThreadState::Ready,
             base_priority: priority,
@@ -251,6 +292,7 @@ pub fn spawn(
             enqueue_seq: seq,
             ticks_executed: 0,
             is_idle: false,
+            ttbr0_root,
             cpu_context: CpuContext::init_thread(entry, arg, stack_top),
             stack_base: Some(stack_phys),
         };
@@ -259,6 +301,18 @@ pub fn spawn(
 
     arch::send_event();
     Ok(ThreadId(id))
+}
+
+/// Returns `(tid, pid, ttbr0_root)` for the currently executing thread on this core.
+pub fn current_thread_info() -> (ThreadId, u64, PhysAddr) {
+    let core = usize::from(arch::core_id());
+    let sched = SCHED.lock();
+    if let Some(slot) = sched.current_slot[core] {
+        let t = &sched.threads[slot];
+        (ThreadId(t.id), t.pid, t.ttbr0_root)
+    } else {
+        (ThreadId(0), 0, mmu::kernel_idle_ttbr0())
+    }
 }
 
 /// Applies a temporary Priority Inheritance boost to `thread_id`.
@@ -304,6 +358,42 @@ pub fn thread_metadata(thread_id: ThreadId) -> Option<(&'static str, Priority)> 
         .iter()
         .find(|t| t.id == thread_id.0 && t.state != ThreadState::Unused)
         .map(|t| (t.name, t.base_priority))
+}
+
+/// Blocks the calling thread until [`unblock`] wakes it.
+pub fn block_current() {
+    let core = usize::from(arch::core_id());
+    {
+        let mut sched = SCHED.lock();
+        if let Some(slot) = sched.current_slot[core]
+            && !sched.threads[slot].is_idle
+        {
+            sched.threads[slot].state = ThreadState::Blocked;
+        }
+    }
+    schedule_on_core(core, false);
+}
+
+/// Marks a previously blocked thread as `Ready` and broadcasts a wakeup event.
+pub fn unblock(thread_id: ThreadId) {
+    {
+        let mut sched = SCHED.lock();
+        let next_seq = sched.next_seq;
+        for t in &mut sched.threads {
+            if t.id == thread_id.0 && t.state == ThreadState::Blocked {
+                t.state = ThreadState::Ready;
+                t.enqueue_seq = next_seq;
+                sched.next_seq += 1;
+                break;
+            }
+        }
+    }
+    arch::send_event();
+}
+
+/// Marks the calling thread as `Exited` and permanently schedules away.
+pub fn exit_current() -> ! {
+    sched_exit_current_thread()
 }
 
 /// Voluntarily yields the current core so higher- or equal-priority threads can run.
@@ -361,7 +451,7 @@ fn schedule_on_core(core: usize, from_irq: bool) {
     }
 
     let saved_daif = arch::save_and_disable_irqs();
-    let switch_ptrs: Option<(*mut CpuContext, *const CpuContext)> = {
+    let switch_plan: Option<(*mut CpuContext, *const CpuContext, PhysAddr, PhysAddr)> = {
         let mut sched = SCHED.lock();
         if sched.pending_requeue[core].is_some() {
             None
@@ -376,6 +466,7 @@ fn schedule_on_core(core: usize, from_irq: bool) {
                 Some(candidate) => {
                     let cand_prio = sched.threads[candidate].effective_priority;
                     if prev_state == ThreadState::Exited
+                        || prev_state == ThreadState::Blocked
                         || prev_is_idle
                         || cand_prio > prev_prio
                         || (cand_prio == prev_prio && (prev_quantum == 0 || !from_irq))
@@ -386,7 +477,7 @@ fn schedule_on_core(core: usize, from_irq: bool) {
                     }
                 }
                 None => {
-                    if prev_state == ThreadState::Exited {
+                    if prev_state == ThreadState::Exited || prev_state == ThreadState::Blocked {
                         sched.idle_slot[core].unwrap_or(prev_slot)
                     } else {
                         prev_slot
@@ -398,6 +489,9 @@ fn schedule_on_core(core: usize, from_irq: bool) {
                 None
             } else {
                 let next_prio = sched.threads[next_slot].effective_priority;
+                let prev_ttbr0 = sched.threads[prev_slot].ttbr0_root;
+                let next_ttbr0 = sched.threads[next_slot].ttbr0_root;
+
                 sched.threads[next_slot].state = ThreadState::Running;
                 sched.threads[next_slot].quantum_remaining = next_prio.default_quantum();
                 sched.current_slot[core] = Some(next_slot);
@@ -406,17 +500,24 @@ fn schedule_on_core(core: usize, from_irq: bool) {
 
                 let prev_ctx = &raw mut sched.threads[prev_slot].cpu_context;
                 let next_ctx = &raw const sched.threads[next_slot].cpu_context;
-                Some((prev_ctx, next_ctx))
+                Some((prev_ctx, next_ctx, prev_ttbr0, next_ttbr0))
             }
         } else {
             None
         }
     };
 
-    if let Some((prev_ctx, next_ctx)) = switch_ptrs {
+    if let Some((prev_ctx, next_ctx, prev_ttbr0, next_ttbr0)) = switch_plan {
+        if next_ttbr0 != prev_ttbr0 {
+            // SAFETY: Kernel runs purely in `TTBR1_EL1`; switching `TTBR0_EL1` safely swaps
+            // the EL0 lower-half address space while IRQs are masked.
+            unsafe {
+                mmu::switch_ttbr0(next_ttbr0);
+            }
+        }
         // SAFETY: `SCHED` lock is released with local IRQs masked (`saved_daif` keeps I=1);
-        // `prev_slot` stays `Running` in `pending_requeue[core]` until `finish_pending_switch`,
-        // preventing any other core from touching `prev_ctx` or `next_ctx` across `switch_context`.
+        // `prev_slot` stays `Running`/`Blocked`/`Exited` in `pending_requeue[core]` until
+        // `finish_pending_switch`, preventing stack aliasing across cores.
         unsafe {
             switch_context(prev_ctx, next_ctx);
         }
@@ -436,7 +537,7 @@ pub extern "C" fn sched_finish_switch_current_core() {
     arch::send_event();
 }
 
-/// Marks the currently executing kernel thread as `Exited` and switches away forever.
+/// Marks the currently executing thread as `Exited` and switches away forever.
 #[unsafe(no_mangle)]
 pub extern "C" fn sched_exit_current_thread() -> ! {
     let core = usize::from(arch::core_id());

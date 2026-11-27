@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use hal_core::{Board, InterruptController, PAGE_SIZE, Timer};
 
-use crate::mem::{phys_to_virt, pmm};
+use crate::mem::{phys_to_virt, pmm, virt_to_phys};
 use crate::{arch, board, sched};
 
 const SECONDARY_STACK_PAGES: usize = 4; // 16 KiB per secondary core
@@ -26,20 +26,14 @@ static ONLINE_CORES_MASK: AtomicU8 = AtomicU8::new(1);
 /// Returns the bitmask of online CPU cores once all cores have checked in (or timeout expires).
 pub fn boot_secondary_cores(active_board: &impl Board) -> u8 {
     let cpu_count = active_board.info().cpu_count.min(sched::MAX_CORES);
-    let entry_phys = (&raw const _start_secondary) as usize;
+    let entry_phys = virt_to_phys((&raw const _start_secondary) as usize).as_usize();
 
     for slot in SECONDARY_STACK_TOPS.iter().take(cpu_count).skip(1) {
         let stack_phys = pmm::alloc_contiguous_frames(SECONDARY_STACK_PAGES)
             .expect("must allocate secondary core stack");
-        // Secondary cores execute `_start_secondary` with `TTBR0` identity mapping initially,
-        // then switch to shared `TTBR0`/`TTBR1` inside `secondary_kernel_main`.
-        let stack_top_ident = stack_phys.as_usize() + SECONDARY_STACK_PAGES * PAGE_SIZE;
+        let stack_top_virt = phys_to_virt(stack_phys) + SECONDARY_STACK_PAGES * PAGE_SIZE;
 
-        slot.store(stack_top_ident, Ordering::Release);
-        let slot_addr = core::ptr::from_ref(slot) as usize;
-        arch::clean_dcache_line(slot_addr);
-        // Ensure higher-half pointer mapping also compiles cleanly if referenced later.
-        let _ = phys_to_virt(stack_phys);
+        slot.store(stack_top_virt, Ordering::Release);
     }
 
     for core in 1..cpu_count {

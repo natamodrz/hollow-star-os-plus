@@ -1,4 +1,4 @@
-// AArch64 callee-saved context switch and new-thread entry trampoline.
+// AArch64 callee-saved context switch, EL0 user entry, and new-thread trampoline.
 // Must match `CpuContext` field layout in `context.rs`:
 //   0x00: x19, x20
 //   0x10: x21, x22
@@ -6,11 +6,12 @@
 //   0x30: x25, x26
 //   0x40: x27, x28
 //   0x50: x29 (fp), x30 (lr)
-//   0x60: sp
+//   0x60: sp, sp_el0
 
 .section .text
 .global switch_context
 .global thread_entry_trampoline
+.global enter_usermode
 
 switch_context:
     stp x19, x20, [x0, #0]
@@ -20,7 +21,8 @@ switch_context:
     stp x27, x28, [x0, #64]
     stp x29, x30, [x0, #80]
     mov x9, sp
-    str x9,       [x0, #96]
+    mrs x10, sp_el0
+    stp x9, x10,  [x0, #96]
 
     ldp x19, x20, [x1, #0]
     ldp x21, x22, [x1, #16]
@@ -28,8 +30,9 @@ switch_context:
     ldp x25, x26, [x1, #48]
     ldp x27, x28, [x1, #64]
     ldp x29, x30, [x1, #80]
-    ldr x9,       [x1, #96]
+    ldp x9, x10,  [x1, #96]
     mov sp, x9
+    msr sp_el0, x10
     ret
 
 thread_entry_trampoline:
@@ -43,3 +46,12 @@ thread_entry_trampoline:
 .Ltrampoline_hang:
     wfe
     b   .Ltrampoline_hang
+
+// Drops to EL0t with entry PC in x0 and user stack pointer in x1.
+enter_usermode:
+    msr daifset, #2
+    msr sp_el0, x1
+    msr elr_el1, x0
+    msr spsr_el1, xzr
+    isb
+    eret

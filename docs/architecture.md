@@ -39,12 +39,12 @@
 
 ---
 
-## 3. Model pamięci i wyjątków (M2 zaimplementowane)
+## 3. Model pamięci i wyjątków (M2 + M4 higher-half)
 
 - **Rozmiar strony:** 4 KiB (`ARMv8-A` 4-poziomowe tablice stron, 48-bitowa przestrzeń VA, `T0SZ=16`, `T1SZ=16`, dynamiczny `IPS` z `ID_AA64MMFR0_EL1`).
-- **Podział przestrzeni adresowej:**
-  - `TTBR0_EL1` (dolna połowa `0x0000_...`): aktualnie mapa tożsamościowa jądra i urządzeń MMIO; docelowo od M4 prywatna przestrzeń adresowa procesu użytkownika (EL0).
-  - `TTBR1_EL1` (górna połowa `0xFFFF_0000_0000_0000 + phys`): bezpośrednie odwzorowanie pamięci fizycznej oraz sekcji Delta Kernel (EL1), niedostępne z EL0 (`AP` + `UXN`).
+- **Podział przestrzeni adresowej (aktywny od M4):**
+  - `TTBR1_EL1` (górna połowa `0xFFFF_0000_0000_0000 + phys`): pełna przestrzeń jądra Delta Kernel (EL1) — kod (`0xFFFF_0000_0008_0000+`), stosy jądra, `VBAR_EL1`, physmap oraz MMIO (`AP` tylko EL1, `UXN=1`).
+  - `TTBR0_EL1` (dolna połowa `0x0000_0000_0000_0000 .. 0x0000_8000_0000_0000`): w pełni izolowana przestrzeń adresowa aktywnego procesu użytkownika (EL0), przełączana przy zmianie kontekstu (`switch_ttbr0`), pusta w wątkach samego jądra. Wszystkie strony EL0 mają ustawiony bit `PXN=1`.
 - **Polityka W^X oraz atrybuty `MAIR_EL1`:**
   - `.text` (`__text_start..__text_end`): `RO + X` (`Normal WB/WA`, `UXN=1`, `PXN=0`).
   - `.rodata` (`__rodata_start..__rodata_end`) oraz obszar poniżej `0x80000`: `RO + XN` (`PXN=1`, `UXN=1`).
@@ -55,16 +55,20 @@
 
 ---
 
-## 4. Model IPC i Capabilities (plan docelowy M4+)
+## 4. Model IPC, Capabilities i Syscalle (M4 zaimplementowane)
 
 Komunikacja między serwerami sterowników, systemami plików i aplikacjami opiera się na **portach komunikatów** (inspirowanych portami BeOS) połączonych z **prawami dostępu (capabilities)** (inspirowanymi seL4/Mach):
 
-1. **Porty / Endpointy:**
-   - Wątek posiadający capability `Send` lub `Receive` do portu może przesyłać krótkie komunikaty synchroniczne (przekazywane przez rejestry CPU) lub buforowane komunikaty asynchroniczne.
-   - Przekazywanie dużych buforów (np. klatki wideo, bloki dyskowe, bufory audio) będzie używać współdzielonych regionów pamięci przekazywanych przez granty/capabilities zamiast wielokrotnego kopiowania.
-2. **Obsługa przerwań w przestrzeni użytkownika (EL0):**
-   - Jądro w EL1 odbiera przerwanie sprzętowe, maskuje źródło IRQ w kontrolerze przerwań i sygnalizuje powiązany port powiadomień serwera sterownika w EL0.
-   - Sterownik (np. `drv-sd`, `drv-uart`) wykonuje faktyczną obsługę urządzenia w przestrzeni nieuprzywilejowanej.
+1. **ABI wywołań systemowych (`userland/delta-abi`, `svc #0`):**
+   - `x8` = numer wywołania (`Exit=0`, `Yield=1`, `GetPid=2`, `PortCreate=10`, `PortSend=11`, `PortRecv=12`, `PortCall=13`, `PortReply=14`, `ServiceRegister=20`, `ServiceLookup=21`, `GetUartMmioInfo=30`), `x0..x5` = argumenty, `x0` = wynik / `-errno`.
+   - Jądro bezpiecznie waliduje wskaźniki z EL0 (`copy_from_user` / `copy_to_user`) w tablicach `TTBR0_EL1` przed dostępem z EL1.
+2. **Porty, Capabilities i Priority Inheritance (`kernel/src/ipc/`):**
+   - Stałe 128-bajtowe komunikaty `IpcMessage` (`tag`, `sender_pid` nadawany przez jądro, `reply_port`, `len`, `data[96]`).
+   - `PortCall` tworzy jednorazowy port odpowiedzi i automatycznie przekazuje jednorazową capability `SEND` odbiorcy w `PortRecv`, podnosząc priorytet serwera (Priority Inheritance) na czas obsługi żądania.
+   - Rejestr nazw usług (`svc.uart`) wydaje klientom wyłącznie capability `SEND`.
+3. **Izolacja sterowników urządzeń w EL0 (`drivers/drv-uart`):**
+   - Wyłącznie serwer `drv-uart` otrzymuje mapowanie 4 KiB strony MMIO UART (`0x0000_1000_0000`, `Device-nGnRnE`, `PXN=1`, `UXN=1`) pozyskanej z `Board::uart_mmio_region()`. Proces `init` nie ma dostępu do MMIO i wypisuje logi wyłącznie przez IPC.
+   - Przekazywanie przerwań sprzętowych (IRQ forwarding) i współdzielone bufory pamięci dla sterowników blokowych/multimedialnych zostaną rozszerzone w M5/M6.
 
 ---
 
@@ -91,6 +95,6 @@ Szczegółowy opis wszystkich kamieni milowych znajduje się w [docs/MILESTONES.
 - **M1 (Boot & Serial) — ukończony:** szkielet workspace, abstrakcja `hal-core` + `board-raspi3b`, zejście `EL2 -> EL1`, UART (PL011 / Mini-UART), parser DTB, smoke test w QEMU `raspi3b`.
 - **M2 (Memory & Exceptions) — ukończony:** wektory wyjątków `VBAR_EL1`, ARM Generic Timer IRQ (`100 Hz`), PMM `4 KiB`, MMU `TTBR0`/`TTBR1` (wyższa połowa + W^X).
 - **M3 (Delta Scheduler & SMP) — ukończony:** przełączanie kontekstu AArch64 (`CpuContext`), wybudzenie wszystkich 4 rdzeni Cortex-A53 (`_start_secondary` + spin-table), kolejki priorytetowe `1..=120` z warstwą Real-Time i dziedziczeniem priorytetów.
-- **M4 (EL0 & IPC) — następny etap:** przejście do EL0, ABI wywołań systemowych (`svc`), porty IPC, pierwszy proces `init` i serwer UART w userlandzie.
-- **M5 (Storage & VFS):** serwer SD/eMMC, VFS, FAT32, ładowanie plików ELF.
+- **M4 (EL0 & IPC) — ukończony:** pełny higher-half kernel w `TTBR1_EL1`, izolowane przestrzenie `TTBR0_EL1` ładowane przez loader ELF64, ABI `svc #0`, porty IPC z capabilities i PI, proces `init` komunikujący się z serwerem `drv-uart` w EL0.
+- **M5 (Storage & VFS) — następny etap:** serwer SD/eMMC (`drv-sd`), IRQ forwarding do EL0, VFS, FAT32/ext2, ładowanie plików ELF i paczek `.hsapp` z systemu plików.
 - **M6 (Multimedia & UI):** kompozytor graficzny (Framebuffer/HDMI), potok audio wykorzystujący priorytety RT, powłoka i aplikacje.

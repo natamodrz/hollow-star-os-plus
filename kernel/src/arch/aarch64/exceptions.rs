@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use hal_core::{InterruptController, IrqSource, SerialConsole, Timer};
 
-use crate::{arch, board, sched};
+use crate::{arch, board, sched, syscall};
 
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(include_str!("vectors.S"));
@@ -78,8 +78,15 @@ extern "C" fn rust_irq_handler(_tf: &mut TrapFrame, _kind: u64) {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn rust_sync_exception_handler(tf: &mut TrapFrame, kind: u64) -> ! {
-    report_fatal_exception("Synchronous Exception", tf, kind)
+extern "C" fn rust_sync_exception_handler(tf: &mut TrapFrame, kind: u64) {
+    let ec = (tf.esr_el1 >> 26) & 0x3F;
+    // EC = 0x15 (`SVC` in AArch64 state) from vector 8 (Lower EL AArch64 Sync).
+    if kind == 8 && ec == 0x15 {
+        let ret = syscall::dispatch(tf);
+        tf.x[0] = ret as u64;
+        return;
+    }
+    report_fatal_exception("Synchronous Exception", tf, kind);
 }
 
 #[unsafe(no_mangle)]

@@ -6,15 +6,19 @@
 
 mod arch;
 mod board;
+mod ipc;
 mod mem;
+mod proc;
 mod sched;
 mod smp;
 mod sync;
+mod syscall;
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
+use delta_abi::UartKind;
 use hal_core::{Board, BoardInfo, Dtb, InterruptController, SerialConsole, Timer, VirtAddr};
 
 use crate::mem::{HIGHER_HALF_OFFSET, KernelLayout, pmm};
@@ -25,16 +29,19 @@ const BANNER_MAGIC: u64 = 0x4445_4C54_415F_4D32; // "DELTA_M2"
 #[unsafe(no_mangle)]
 static M2_HIGHER_HALF_PROBE: u64 = BANNER_MAGIC;
 
+static DRV_UART_ELF: &[u8] = include_bytes!(env!("DRV_UART_ELF"));
+static INIT_ELF: &[u8] = include_bytes!(env!("INIT_ELF"));
+
 static PRIO_TRACE_LEN: AtomicUsize = AtomicUsize::new(0);
 static PRIO_TRACE: [AtomicU8; 5] = [const { AtomicU8::new(0) }; 5];
 static SMP_EXEC_MASK: AtomicU8 = AtomicU8::new(0);
 
-/// Rust kernel entry called from AArch64 boot assembly in EL1 with BSS cleared.
+/// Rust kernel entry called from AArch64 boot assembly in EL1 higher-half (`TTBR1_EL1`).
 ///
 /// # Safety
 ///
 /// Must be entered only once on primary core 0 after EL1 initialization,
-/// valid stack setup, and `.bss` zeroing.
+/// valid stack setup, `.bss` zeroing, and boot MMU activation.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     let mut active_board = board::init();
@@ -43,7 +50,6 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     let core = arch::core_id();
     let layout = KernelLayout::from_linker();
 
-    // Print boot banner before bringing up memory, exceptions, and SMP scheduler.
     {
         let mut out = active_board.console().writer();
         let _ = writeln!(
@@ -64,14 +70,14 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
         let _ = writeln!(
             out,
-            "[boot] EL1 active, BSS cleared (kernel={:#x}..{:#x})",
+            "[boot] EL1 active in higher-half TTBR1, BSS cleared (kernel={:#x}..{:#x})",
             layout.kernel_start, layout.kernel_end
         );
     }
 
     let (dtb_ram, dtb_span) = inspect_dtb(&mut active_board, dtb_ptr, &info);
 
-    // M2 Step 1: Initialize 4 KiB physical frame allocator (PMM) and smoke-test alloc/free.
+    // Initialize 4 KiB physical frame allocator (PMM).
     pmm::init(active_board.memory_regions(), dtb_ram, dtb_span, &layout);
     let test_frame = pmm::alloc_frame().expect("PMM must yield a free frame");
     pmm::free_frame(test_frame).expect("PMM free_frame must succeed");
@@ -88,12 +94,11 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
     }
 
-    // M2 Step 2: Build identity (TTBR0) + higher-half (TTBR1) W^X page tables and enable MMU.
+    // Install full W^X TTBR1_EL1 kernel page tables and empty idle TTBR0_EL1.
     let mmu_cfg = arch::mmu::init(active_board.memory_regions(), dtb_ram, &layout)
         .expect("MMU initialization must succeed");
 
-    let probe_phys = (&raw const M2_HIGHER_HALF_PROBE) as usize;
-    let probe_hh_va = HIGHER_HALF_OFFSET.saturating_add(probe_phys);
+    let probe_hh_va = (&raw const M2_HIGHER_HALF_PROBE) as usize;
     let translated_hh = arch::mmu::translate(mmu_cfg.ttbr1_root, VirtAddr(probe_hh_va))
         .expect("TTBR1 higher-half probe must translate");
     // SAFETY: `probe_hh_va` is mapped via `TTBR1_EL1` to `M2_HIGHER_HALF_PROBE` in `.rodata`.
@@ -104,7 +109,7 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         let mut out = active_board.console().writer();
         let _ = writeln!(
             out,
-            "[mmu]  MMU enabled (TTBR0={:#x}, TTBR1={:#x}, 4K_pages={}, 2M_blocks={})",
+            "[mmu]  MMU enabled (TTBR0_idle={:#x}, TTBR1={:#x}, 4K_pages={}, 2M_blocks={})",
             mmu_cfg.ttbr0_root.as_usize(),
             mmu_cfg.ttbr1_root.as_usize(),
             mmu_cfg.pages_mapped_4k,
@@ -118,7 +123,7 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
     }
 
-    // M2/M3 Step 3: Install EL1 exception vectors (`VBAR_EL1`), init scheduler & arm timer IRQ.
+    // Install EL1 exception vectors (`VBAR_EL1`), init scheduler & arm timer IRQ.
     arch::exceptions::init();
     sched::init_primary();
 
@@ -147,7 +152,7 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
     }
 
-    // M3 Step 4: Wake secondary Cortex-A53 cores and verify BeOS-inspired SMP Delta Scheduler.
+    // Wake secondary Cortex-A53 cores and verify BeOS-inspired SMP Delta Scheduler.
     let online_mask = smp::boot_secondary_cores(&active_board);
     assert_eq!(
         online_mask, 0b1111,
@@ -155,7 +160,7 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     );
 
     verify_priority_and_rt_order();
-    verify_smp_four_cores(&active_board);
+    verify_smp_four_cores();
 
     let sched_stats = sched::stats();
     let online_verified = smp::online_mask();
@@ -174,9 +179,52 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
             sched_stats.total_threads_created,
             sched_stats.context_switches
         );
+    }
+    active_board.console().flush();
+
+    // M4 Step 5: Launch EL0 userspace UART server (`drv-uart`) and `init` via ELF64 loader.
+    let uart_region = active_board.uart_mmio_region();
+    let uart_kind = if cfg!(feature = "mini-uart") {
+        UartKind::MiniUart
+    } else {
+        UartKind::Pl011
+    };
+
+    let drv_uart_pid = proc::spawn_elf(
+        "drv-uart",
+        DRV_UART_ELF,
+        Priority::URGENT,
+        Some((uart_region, uart_kind)),
+    )
+    .expect("spawn EL0 drv-uart server");
+
+    let init_pid =
+        proc::spawn_elf("init", INIT_ELF, Priority::NORMAL, None).expect("spawn EL0 init process");
+
+    let timer = board::timer_handle();
+    let el0_deadline = timer.counter().saturating_add(timer.frequency_hz() * 2);
+    loop {
+        if let Some((true, code, _)) = proc::status(init_pid) {
+            assert_eq!(code, 0, "EL0 init exited with non-zero code {code}");
+            break;
+        }
+        assert!(
+            timer.counter() < el0_deadline,
+            "Timed out waiting for EL0 init -> drv-uart IPC round-trip"
+        );
+        sched::yield_now();
+        arch::wait_for_event();
+    }
+
+    {
+        let mut out = active_board.console().writer();
         let _ = writeln!(
             out,
-            "[boot] Milestone M3 (Delta Scheduler & SMP) ready. Entering idle loop."
+            "[el0]  EL0 processes spawned (drv-uart pid={drv_uart_pid}, init pid={init_pid} exited=0)"
+        );
+        let _ = writeln!(
+            out,
+            "[boot] Milestone M4 (EL0 & IPC) ready. Entering idle loop."
         );
     }
 
@@ -190,8 +238,6 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
 fn verify_priority_and_rt_order() {
     PRIO_TRACE_LEN.store(0, Ordering::Release);
 
-    // Mask Core 0 IRQs while batch-spawning so all 4 threads enter the ready queue
-    // before Core 0 dispatches the highest-priority thread (`affinity = Some(0)`).
     let saved = arch::save_and_disable_irqs();
     let _normal = sched::spawn(
         "worker-normal",
@@ -217,7 +263,6 @@ fn verify_priority_and_rt_order() {
         b'P' as usize,
     )
     .expect("spawn pi");
-    // Demonstrate Priority Inheritance boost raising a LOW (5) thread to REALTIME_MIN (100).
     sched::boost_priority(pi_low, Priority::REALTIME_MIN);
     assert_eq!(
         sched::effective_priority(pi_low),
@@ -267,7 +312,7 @@ fn verify_priority_and_rt_order() {
     );
 }
 
-fn verify_smp_four_cores(active_board: &impl Board) {
+fn verify_smp_four_cores() {
     SMP_EXEC_MASK.store(0, Ordering::Release);
     for core in 0..4u8 {
         let _ = sched::spawn(
@@ -291,7 +336,6 @@ fn verify_smp_four_cores(active_board: &impl Board) {
         0b1111,
         "All 4 cores must execute scheduled threads"
     );
-    let _ = active_board;
 }
 
 fn prio_worker(tag: usize) {
@@ -329,9 +373,10 @@ fn inspect_dtb(board: &mut impl Board, dtb_ptr: usize, info: &BoardInfo) -> DtbR
         return (None, None);
     }
 
-    // SAFETY: `dtb_ptr` is non-null and within identity-mapped physical RAM bounds;
-    // `Dtb::from_raw_ptr` verifies alignment, magic (`0xd00dfeed`), and header size.
-    match unsafe { Dtb::from_raw_ptr(dtb_ptr) } {
+    // SAFETY: `dtb_ptr` is non-null and within physical RAM bounds;
+    // convert to higher-half virtual address since `TTBR1_EL1` is active.
+    let dtb_virt = HIGHER_HALF_OFFSET.saturating_add(dtb_ptr);
+    match unsafe { Dtb::from_raw_ptr(dtb_virt) } {
         Ok(dtb) => {
             let total = dtb.header().totalsize as usize;
             let model = dtb.model().unwrap_or("unknown");

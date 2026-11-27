@@ -1,6 +1,7 @@
-// AArch64 early boot entry for Delta Kernel (Raspberry Pi 3B / Cortex-A53).
-// Primary core enters `_start` at 0x80000 with x0 = DTB physical address (or 0).
-// Secondary cores wake from firmware spin-table at `_start_secondary`.
+// AArch64 higher-half early boot entry for Delta Kernel (Raspberry Pi 3B / Cortex-A53).
+// Primary core enters `_start` at physical 0x80000 with x0 = DTB physical address (or 0).
+// Boot assembly drops EL3/EL2 -> EL1, zeros .bss, brings up an initial boot TTBR0/TTBR1
+// page table, enables MMU, and jumps to higher-half `kernel_main` (0xFFFF000000080000+).
 
 .section .text.boot, "ax"
 .global _start
@@ -27,11 +28,8 @@ _start:
     b .Lel1_ready
 
 .Lfrom_el3:
-    // Drop EL3 -> EL2 (AArch64 Non-Secure) if hardware firmware starts in EL3.
-    // SCR_EL3: RW (bit 10) | HCE (bit 8) | SMD (bit 7) | NS (bit 0) = 0x581
     mov x0, #0x581
     msr scr_el3, x0
-    // SPSR_EL3: mask DAIF (0x3C0) | EL2h (0b1001) = 0x3C9
     mov x0, #0x3C9
     msr spsr_el3, x0
     adr x0, .Lfrom_el2
@@ -40,23 +38,19 @@ _start:
     eret
 
 .Lfrom_el2:
-    // Configure EL1 to execute in AArch64 (HCR_EL2.RW, bit 31).
     mov x0, #(1 << 31)
     msr hcr_el2, x0
 
-    // Allow EL1 access to the physical counter/timer and clear virtual offset.
     mrs x0, cnthctl_el2
     orr x0, x0, #0x3
     msr cnthctl_el2, x0
     msr cntvoff_el2, xzr
 
-    // Disable EL2 trapping of FP/SIMD and CPACR_EL1 while preserving RES1 bits.
     mrs x0, cptr_el2
     bic x0, x0, #(1 << 10)
     bic x0, x0, #(1 << 31)
     msr cptr_el2, x0
 
-    // Drop EL2 -> EL1h (SP_EL1) with DAIF interrupts masked (0x3C0 | 0b0101 = 0x3C5).
     mov x0, #0x3C5
     msr spsr_el2, x0
     adr x0, .Lel1_ready
@@ -65,17 +59,12 @@ _start:
     eret
 
 .Lel1_ready:
-    // Enable FP/SIMD instructions in EL1 (CPACR_EL1.FPEN = 0b11, bits [21:20]).
+    // Enable FP/SIMD instructions in EL1 (CPACR_EL1.FPEN = 0b11).
     mov x0, #(0x3 << 20)
     msr cpacr_el1, x0
     isb
 
-    // Initialize EL1 stack pointer (16-byte aligned top of dedicated .stack section).
-    adrp x0, __boot_stack_top
-    add  x0, x0, :lo12:__boot_stack_top
-    mov  sp, x0
-
-    // Clear .bss in 16-byte steps (bounds are 16-byte aligned in linker.ld).
+    // Clear .bss (including BOOT_PT_* pages) using PC-relative physical addresses.
     adrp x0, __bss_start
     add  x0, x0, :lo12:__bss_start
     adrp x1, __bss_end
@@ -87,10 +76,97 @@ _start:
     b    .Lbss_loop
 .Lbss_done:
 
-    // Enter Rust kernel_main(dtb_ptr: usize).
+    // Populate initial 2 MiB-block boot page tables (covers 0x0..0x4020_0000 for both TTBR0 & TTBR1).
+    adrp x0, BOOT_PT_L0
+    add  x0, x0, :lo12:BOOT_PT_L0
+    adrp x1, BOOT_PT_L1
+    add  x1, x1, :lo12:BOOT_PT_L1
+    adrp x2, BOOT_PT_L2_LOW
+    add  x2, x2, :lo12:BOOT_PT_L2_LOW
+    adrp x3, BOOT_PT_L2_HIGH
+    add  x3, x3, :lo12:BOOT_PT_L2_HIGH
+
+    // L0[0] -> L1
+    orr  x4, x1, #0b11
+    str  x4, [x0, #0]
+    // L1[0] -> L2_LOW (0..1 GiB), L1[1] -> L2_HIGH (1..2 GiB)
+    orr  x4, x2, #0b11
+    str  x4, [x1, #0]
+    orr  x4, x3, #0b11
+    str  x4, [x1, #8]
+
+    // Fill L2_LOW[0..504] with Normal WB/WA 2 MiB blocks (0x0..0x3F00_0000).
+    mov  x4, #0                     // index
+    mov  x5, #504
+    mov  x6, #0x701                 // Valid | Block | Attr0 | InnerShare | AF
+.Ll2_ram_loop:
+    lsl  x7, x4, #21                // phys = index * 2 MiB
+    orr  x7, x7, x6
+    str  x7, [x2, x4, lsl #3]
+    add  x4, x4, #1
+    cmp  x4, x5
+    b.lo .Ll2_ram_loop
+
+    // Fill L2_LOW[504..512] with Device-nGnRnE 2 MiB blocks (0x3F00_0000..0x4000_0000).
+    mov  x5, #512
+    ldr  x6, =0x0060000000000405    // Valid | Block | Attr1 | AF | PXN | UXN
+.Ll2_mmio_loop:
+    lsl  x7, x4, #21
+    orr  x7, x7, x6
+    str  x7, [x2, x4, lsl #3]
+    add  x4, x4, #1
+    cmp  x4, x5
+    b.lo .Ll2_mmio_loop
+
+    // L2_HIGH[0] -> 0x4000_0000..0x4020_0000 Device-nGnRnE (ARM Local Peripherals).
+    mov  x7, #0x40000000
+    orr  x7, x7, x6
+    str  x7, [x3, #0]
+
+    // Enable MMU with BOOT_PT_L0 in both TTBR0_EL1 and TTBR1_EL1.
+    bl   .Lenable_boot_mmu
+
+    // Jump into true higher-half TTBR1_EL1 virtual address space.
+    ldr  x1, =__boot_stack_top
+    mov  sp, x1
+    ldr  x1, =kernel_main
     mov  x0, x19
-    bl   kernel_main
+    blr  x1
     b    .Lpark_core
+
+// Enable MMU using L0 root physical address in x0 for both TTBR0_EL1 and TTBR1_EL1.
+// Clobbers x1..x4; preserves x0 and x19.
+.Lenable_boot_mmu:
+    ldr  x1, =0x00000000004400FF    // Attr0=0xFF (Normal), Attr1=0x00 (Device), Attr2=0x44 (NC)
+    msr  mair_el1, x1
+
+    mrs  x1, id_aa64mmfr0_el1
+    and  x1, x1, #0xF
+    cmp  x1, #5
+    b.ls .Lips_ok
+    mov  x1, #5
+.Lips_ok:
+    ldr  x2, =0x00000000B5103510    // T0SZ=16, T1SZ=16, IRGN/ORGN=WBWA, SH=IS, TG0=4K, TG1=4K
+    orr  x2, x2, x1, lsl #32
+    msr  tcr_el1, x2
+
+    msr  ttbr0_el1, x0
+    msr  ttbr1_el1, x0
+    dsb  ishst
+    isb
+    tlbi vmalle1
+    ic   iallu
+    dsb  ish
+    isb
+
+    mrs  x1, sctlr_el1
+    ldr  x2, =0x101D                // M (0) | C (2) | SA (3) | SA0 (4) | I (12)
+    orr  x1, x1, x2
+    ldr  x2, =((1 << 19) | (1 << 24) | (1 << 25))
+    bic  x1, x1, x2
+    msr  sctlr_el1, x1
+    isb
+    ret
 
 // Secondary core entry jumped to from firmware spin-table (`0xE0`/`0xE8`/`0xF0`).
 _start_secondary:
@@ -146,16 +222,34 @@ _start_secondary:
     msr cpacr_el1, x0
     isb
 
-    // Load per-core stack top prepared and cache-cleaned by Core 0.
-    adrp x0, SECONDARY_STACK_TOPS
-    add  x0, x0, :lo12:SECONDARY_STACK_TOPS
+    adrp x0, BOOT_PT_L0
+    add  x0, x0, :lo12:BOOT_PT_L0
+    bl   .Lenable_boot_mmu
+
+    ldr  x0, =.Lsec_higher_half
+    br   x0
+
+.Lsec_higher_half:
+    ldr  x0, =SECONDARY_STACK_TOPS
     ldr  x0, [x0, x19, lsl #3]
     cbz  x0, .Lpark_core
     mov  sp, x0
 
     mov  x0, x19
-    bl   secondary_kernel_main
+    ldr  x1, =secondary_kernel_main
+    blr  x1
 
 .Lpark_core:
     wfe
     b    .Lpark_core
+
+.section .bss
+.balign 4096
+BOOT_PT_L0:
+    .space 4096
+BOOT_PT_L1:
+    .space 4096
+BOOT_PT_L2_LOW:
+    .space 4096
+BOOT_PT_L2_HIGH:
+    .space 4096

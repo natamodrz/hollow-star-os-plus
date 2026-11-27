@@ -55,6 +55,10 @@ pub trait Board {
     /// Returns static physical memory & MMIO region descriptors for this board.
     fn memory_regions(&self) -> &[MemoryRegion];
 
+    /// Returns the 4 KiB-aligned physical MMIO region of the active early UART controller
+    /// so a userspace driver server (EL0) can be granted isolated access to it.
+    fn uart_mmio_region(&self) -> MemoryRegion;
+
     /// Wakes secondary CPU core `core_id` (`1..cpu_count`) to begin executing at
     /// physical address `entry_phys`.
     fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError>;

@@ -1,0 +1,9 @@
+[package]
+name = "libdelta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Userspace syscall, IPC, and runtime library for Hollow Star OS+ (EL0)"
+
+[dependencies]
+delta-abi = { path = "../delta-abi" }
