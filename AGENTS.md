@@ -44,4 +44,8 @@
 - Full verification pipeline before completing a milestone: `./delta.sh ci`
 - Note: Use `UART_MODE=mini` if Mini-UART (UART1) is used instead of PL011 (UART0). Never run `./delta.sh run` interactively from an automated agent turn — always use `./delta.sh smoke`.
 
+## Cross-Agent Ecosystem Memory & Sync Rules
+- Shared ecosystem memory lives at `/Users/nataniel/project/memory/` (`INDEX.md`, `CONVENTIONS.md`, `FEATURES_AND_UX.md`, `PROJECT_PLUS.md`, `PROJECT_STANDARD.md`, `PROJECT_BASIC.md`, `PROMPT_SYNC_MEMORY.md`). Always check `/Users/nataniel/project/memory/` and `/Users/nataniel/project/bugs/hollow-star-os-plus/` before starting non-trivial work.
+- `userland/delta-abi`, `fs/src/deltafs.rs`, and `.hsapp` layout here are the canonical upstream ABI for `hollow-star-os` (x86/x86_64 netbook edition with ARM64 translation). Whenever updating ABI, UI conventions, bugs, or milestones, update `/Users/nataniel/project/memory/PROJECT_PLUS.md` and provide a short sync prompt (`PROMPT_SYNC_MEMORY.md`) for Agents 1 and 3.
+
 ## Imprtant! Always read folder_structure.txt for the planned directory layout and keep it updated when adding new top-level modules.
