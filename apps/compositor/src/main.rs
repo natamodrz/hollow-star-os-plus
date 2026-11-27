@@ -180,8 +180,7 @@ fn delta_main() -> usize {
         let _ = libdelta::wait_pid(child_pid);
         comp.cfg.load_from_vfs(vfs);
         if exit_to_shell {
-            fb_canvas.clear(BG);
-            comp.flush_fb(100);
+            comp.present_shell_handoff(&mut fb_canvas);
             break;
         }
         current_exec = next_exec;
@@ -263,6 +262,55 @@ impl CompositorState {
         fb_canvas.clear(BG);
         self.draw_status_bar(fb_canvas);
         fb_canvas.draw_text_centered((FB_W / 2) as i32, (FB_H / 2) as i32, msg, MUTED, 1);
+        self.flush_fb(self.cfg.brightness);
+    }
+
+    fn present_shell_handoff(&self, fb_canvas: &mut Canvas) {
+        let lang = self.cfg.lang;
+        fb_canvas.clear(BG);
+        self.draw_status_bar(fb_canvas);
+        fb_canvas.draw_box(76, 130, 488, 200, PANEL, ACCENT);
+        fb_canvas.draw_hollow_star(106, 162, 11, ACCENT);
+        fb_canvas.draw_text(
+            128,
+            154,
+            tr(
+                lang,
+                "Interactive Shell Mode (delta>)",
+                "Tryb Konsoli Interaktywnej (delta>)",
+            ),
+            ACCENT,
+        );
+        fb_canvas.draw_text(
+            104,
+            196,
+            tr(
+                lang,
+                "Serial UART console is active in the host terminal.",
+                "Konsola szeregowa UART jest aktywna w oknie terminala.",
+            ),
+            TEXT,
+        );
+        fb_canvas.draw_text(
+            104,
+            226,
+            tr(
+                lang,
+                "You can also type 'gui' + Enter via USB keyboard right here",
+                "Możesz też wpisać 'gui' + Enter na klawiaturze USB tutaj",
+            ),
+            CYAN,
+        );
+        fb_canvas.draw_text(
+            104,
+            256,
+            tr(
+                lang,
+                "to reopen the Desktop, or use commands like df, ls, cat, uname.",
+                "aby wrócić do Pulpitu, lub używać komend w terminalu.",
+            ),
+            MUTED,
+        );
         self.flush_fb(self.cfg.brightness);
     }
 

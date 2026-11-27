@@ -330,6 +330,7 @@ pub enum KeyCode {
     CtrlC = 14,
     CtrlN = 15,
     CtrlF = 16,
+    AltTab = 17,
 }
 
 impl KeyCode {
@@ -351,6 +352,7 @@ impl KeyCode {
             14 => Self::CtrlC,
             15 => Self::CtrlN,
             16 => Self::CtrlF,
+            17 => Self::AltTab,
             _ => Self::None,
         }
     }

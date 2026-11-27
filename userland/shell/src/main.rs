@@ -3,7 +3,10 @@
 
 //! Unix-like EL0 Shell (`/system/bin/shell.elf`) loaded dynamically from DeltaFS System partition.
 
-use libdelta::delta_abi::{IpcMessage, MSG_UART_READ, SVC_UART, SVC_VFS, VfsPartitionStat};
+use libdelta::delta_abi::{
+    IpcMessage, KbdPacket, KeyCode, MSG_KBD_ACK, MSG_KBD_READ, MSG_UART_READ, SVC_KBD, SVC_UART,
+    SVC_VFS, VfsPartitionStat, unpack_msg,
+};
 
 #[unsafe(no_mangle)]
 fn delta_main() -> usize {
@@ -79,10 +82,20 @@ fn run_m6_storage_and_ui(uart: usize, vfs: usize) -> Result<(), isize> {
 fn interactive_loop(uart: usize, vfs: usize) {
     let mut line = [0u8; 128];
     let mut len = 0usize;
+    let mut kbd = libdelta::service_lookup(SVC_KBD).ok();
     libdelta::print_via(uart, "delta> ");
 
     loop {
-        let Some(ch) = read_uart_byte(uart) else {
+        let ch = if let Some(b) = read_uart_byte(uart) {
+            Some(b)
+        } else {
+            if kbd.is_none() {
+                kbd = libdelta::service_lookup(SVC_KBD).ok();
+            }
+            kbd.and_then(read_kbd_byte)
+        };
+
+        let Some(ch) = ch else {
             libdelta::yield_now();
             continue;
         };
@@ -213,6 +226,24 @@ fn read_uart_byte(uart: usize) -> Option<u8> {
     let mut reply = IpcMessage::new(0);
     if libdelta::port_call(uart, &req, &mut reply).is_ok() && reply.len > 0 {
         Some(reply.data[0])
+    } else {
+        None
+    }
+}
+
+fn read_kbd_byte(kbd: usize) -> Option<u8> {
+    let req = IpcMessage::new(MSG_KBD_READ);
+    let mut reply = IpcMessage::new(0);
+    if libdelta::port_call(kbd, &req, &mut reply).is_ok()
+        && reply.tag == MSG_KBD_ACK
+        && let Some(pkt) = unpack_msg::<KbdPacket>(&reply)
+    {
+        match KeyCode::from_u8(pkt.kind) {
+            KeyCode::Char => Some(pkt.ch),
+            KeyCode::Enter => Some(b'\n'),
+            KeyCode::Backspace => Some(0x08),
+            _ => None,
+        }
     } else {
         None
     }
