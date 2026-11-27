@@ -9,7 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-export PATH="/Users/nataniel/.cargo/bin:/opt/homebrew/bin:$PATH"
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 PROFILE="${PROFILE:-release}"
 KERNEL_IMG="target/kernel8.img"
