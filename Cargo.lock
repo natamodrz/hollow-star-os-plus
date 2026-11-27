@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "board-raspi02w"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "board-raspi3b",
  "hal-core",
@@ -12,71 +12,71 @@ dependencies = [
 
 [[package]]
 name = "board-raspi3b"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "hal-core",
 ]
 
 [[package]]
 name = "delta-abi"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 
 [[package]]
 name = "drv-audio"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "drv-fb"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "drv-sd"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "drv-uart"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "hal-core"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 
 [[package]]
 name = "hello-app"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "hollow-star-app"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "init"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "kernel"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "board-raspi02w",
  "board-raspi3b",
@@ -86,21 +86,21 @@ dependencies = [
 
 [[package]]
 name = "libdelta"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "delta-abi",
 ]
 
 [[package]]
 name = "shell"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "vfs-server"
-version = "0.6.0"
+version = "0.6.0-rc.1"
 dependencies = [
  "libdelta",
 ]

@@ -8,6 +8,7 @@ hollow-star-os-plus/
 ├── .github/workflows/        # GitHub Actions CI/CD (testy QEMU + budowanie i publikacja obrazów)
 ├── .gitignore                # Reguły ignorowania artefaktów kompilacji, obrazów i first-prompt.txt
 ├── delta.sh                  # Główny skrypt build/check/unit/smoke/ci
+├── test-rc1.sh               # Skrypt testowy RC1 (grafika FB, audio RT, usb-net, DeltaFS, Launcher)
 ├── run-qemu.sh               # Wrapper uruchamiający obraz w qemu-system-aarch64 (-M raspi3b)
 ├── tools/
 │   └── mk_sdcard.py          # Generator obrazu karty SD (MBR: /boot FAT32 + /system DeltaFS + /user DeltaFS)

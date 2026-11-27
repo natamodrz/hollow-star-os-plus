@@ -8,10 +8,12 @@ mod font;
 mod games;
 mod gfx;
 mod i18n;
+mod icons;
 
 use games::{GameId, GameState, Key as GameKey};
 use gfx::{Canvas, SCREEN_H, SCREEN_W};
 use i18n::{BufWriter, Lang, OsConfig, tr, wireless_enabled};
+use icons::{IconKind, draw_icon_2x};
 use libdelta::delta_abi::{
     AudioPacket, FbPacket, IpcMessage, MSG_AUDIO_PLAY_TONE, MSG_AUDIO_SET_ROUTE, MSG_AUDIO_SET_VOL,
     MSG_AUDIO_STATUS, MSG_AUDIO_STOP, MSG_FB_GET_INFO, MSG_FB_PRESENT, MSG_UART_READ, SVC_AUDIO,
@@ -70,6 +72,10 @@ struct AppContext {
     screen: Screen,
     help_open: bool,
     menu_idx: usize,
+    launcher_notice: [u8; 48],
+    launcher_notice_len: usize,
+    discovered_apps: [u8; 96],
+    discovered_len: usize,
     // Setup & Settings cursors
     setup_cursor: usize,
     // Explorer
@@ -140,6 +146,10 @@ fn delta_main() -> usize {
         },
         help_open: false,
         menu_idx: 0,
+        launcher_notice: [0; 48],
+        launcher_notice_len: 0,
+        discovered_apps: [0; 96],
+        discovered_len: 0,
         setup_cursor: 0,
         exp_path: [0; 64],
         exp_path_len: 1,
@@ -165,6 +175,7 @@ fn delta_main() -> usize {
     ctx.exp_path[0] = b'/';
     ctx.set_default_note();
     ctx.refresh_storage();
+    ctx.scan_hsapp_bundles();
 
     // Trigger RT Audio startup chime (verifies Priority 110 mixer during boot) & present first frame.
     ctx.audio_info = call_audio(
@@ -220,6 +231,73 @@ impl AppContext {
         self.part_count = libdelta::vfs_statfs(self.vfs, &mut self.part_stats).unwrap_or(0);
     }
 
+    fn scan_hsapp_bundles(&mut self) {
+        let mut dir_buf = [0u8; 512];
+        let mut out = BufWriter::new(&mut self.discovered_apps);
+        let mut first = true;
+        for dir_path in ["/system/apps", "/user/apps"] {
+            if let Ok(n) = libdelta::vfs_readdir(self.vfs, dir_path, &mut dir_buf)
+                && let Ok(text) = core::str::from_utf8(&dir_buf[..n])
+            {
+                for line in text.lines() {
+                    if let Some(rest) = line.strip_prefix("[DIR]  ") {
+                        let name = rest.trim_end_matches('/');
+                        if name.ends_with(".hsapp") {
+                            if !first {
+                                out.str(", ");
+                            }
+                            out.str(name);
+                            first = false;
+                        }
+                    }
+                }
+            }
+        }
+        self.discovered_len = out.pos;
+    }
+
+    fn set_launcher_notice(&mut self, msg: &str) {
+        let b = msg.as_bytes();
+        let n = b.len().min(self.launcher_notice.len());
+        self.launcher_notice[..n].copy_from_slice(&b[..n]);
+        self.launcher_notice_len = n;
+    }
+
+    fn launch_menu_item(&mut self, idx: usize) -> bool {
+        match idx {
+            0 => {
+                self.refresh_storage();
+                self.screen = Screen::SysInfo;
+            }
+            1 => self.screen = Screen::NotesStage1,
+            2 => {
+                self.load_explorer_dir();
+                self.screen = Screen::Explorer;
+            }
+            3 => {
+                self.audio_info = call_audio(self.audio, MSG_AUDIO_STATUS, 0, 0, 0, 0);
+                self.screen = Screen::MediaPlayer;
+            }
+            4 => self.screen = Screen::Calculator,
+            5 => self.screen = Screen::GamesMenu,
+            6 => {
+                self.setup_cursor = 0;
+                self.screen = Screen::Settings;
+            }
+            7 => {
+                if let Ok(pid) = libdelta::spawn_from_vfs("hello", "/system/apps/Hello.hsapp/exec")
+                {
+                    let _ = libdelta::wait_pid(pid);
+                    self.set_launcher_notice("Hello.hsapp/exec OK");
+                } else {
+                    self.set_launcher_notice("Hello.hsapp launch ERR");
+                }
+            }
+            _ => return true,
+        }
+        false
+    }
+
     fn load_explorer_dir(&mut self) {
         let path = core::str::from_utf8(&self.exp_path[..self.exp_path_len]).unwrap_or("/");
         if let Ok(n) = libdelta::vfs_readdir(self.vfs, path, &mut self.exp_buf) {
@@ -233,10 +311,20 @@ impl AppContext {
         let mut esc_state = 0u8;
         let mut esc_buf = [0u8; 8];
         let mut esc_len = 0usize;
+        let mut esc_idle = 0u32;
         let mut tick_count = 0u32;
 
         loop {
             if let Some(byte) = read_uart_byte(self.uart) {
+                esc_idle = 0;
+                if esc_state == 1 && byte != b'[' && byte != b'O' {
+                    esc_state = 0;
+                    if self.handle_key(InputKey::Esc) {
+                        return;
+                    }
+                    self.render();
+                    present_frame(self);
+                }
                 if let Some(key) = decode_key(byte, &mut esc_state, &mut esc_buf, &mut esc_len) {
                     if self.handle_key(key) {
                         return;
@@ -245,6 +333,18 @@ impl AppContext {
                     present_frame(self);
                 }
             } else {
+                if esc_state == 1 {
+                    esc_idle += 1;
+                    if esc_idle >= 32 {
+                        esc_state = 0;
+                        esc_idle = 0;
+                        if self.handle_key(InputKey::Esc) {
+                            return;
+                        }
+                        self.render();
+                        present_frame(self);
+                    }
+                }
                 tick_count = tick_count.wrapping_add(1);
                 if self.screen == Screen::GamePlay
                     && !self.help_open
@@ -359,30 +459,22 @@ impl AppContext {
                 }
             }
             Screen::Launcher => match key {
-                InputKey::Up => self.menu_idx = (self.menu_idx + 7) % 8,
-                InputKey::Down => self.menu_idx = (self.menu_idx + 1) % 8,
-                InputKey::Enter => match self.menu_idx {
-                    0 => {
-                        self.refresh_storage();
-                        self.screen = Screen::SysInfo;
+                InputKey::Left => self.menu_idx = (self.menu_idx + 8) % 9,
+                InputKey::Right | InputKey::Tab => self.menu_idx = (self.menu_idx + 1) % 9,
+                InputKey::Up => self.menu_idx = (self.menu_idx + 6) % 9,
+                InputKey::Down => self.menu_idx = (self.menu_idx + 3) % 9,
+                InputKey::Enter => {
+                    if self.launch_menu_item(self.menu_idx) {
+                        return true;
                     }
-                    1 => self.screen = Screen::NotesStage1,
-                    2 => {
-                        self.load_explorer_dir();
-                        self.screen = Screen::Explorer;
+                }
+                InputKey::Char(c) if (b'1'..=b'9').contains(&c) => {
+                    let idx = usize::from(c - b'1');
+                    self.menu_idx = idx;
+                    if self.launch_menu_item(idx) {
+                        return true;
                     }
-                    3 => {
-                        self.audio_info = call_audio(self.audio, MSG_AUDIO_STATUS, 0, 0, 0, 0);
-                        self.screen = Screen::MediaPlayer;
-                    }
-                    4 => self.screen = Screen::Calculator,
-                    5 => self.screen = Screen::GamesMenu,
-                    6 => {
-                        self.setup_cursor = 0;
-                        self.screen = Screen::Settings;
-                    }
-                    _ => return true,
-                },
+                }
                 InputKey::Char(b'q') | InputKey::Char(b'Q') => return true,
                 _ => {}
             },
@@ -677,8 +769,12 @@ impl AppContext {
         self.canvas
             .draw_box(0, 0, SCREEN_W as i32, 28, gfx::PANEL, gfx::BORDER);
         self.canvas.draw_hollow_star(16, 14, 9, gfx::ACCENT);
-        self.canvas
-            .draw_text(32, 10, "HOLLOW STAR OS+ v0.6.0", gfx::TEXT);
+        self.canvas.draw_text(
+            32,
+            10,
+            concat!("HOLLOW STAR OS+ v", env!("CARGO_PKG_VERSION")),
+            gfx::TEXT,
+        );
 
         let mut right = [0u8; 64];
         let mut w = BufWriter::new(&mut right);
@@ -804,58 +900,95 @@ impl AppContext {
 
     fn draw_launcher(&mut self) {
         let l = self.cfg.lang;
-        let items = [
-            tr(
-                l,
-                "System Info (RAM / Temp / DeltaFS)",
-                "Informacje o systemie (RAM / Temp / DeltaFS)",
+        let items: [(&str, &str, IconKind); 9] = [
+            (
+                tr(l, "1. Sys Info", "1. System"),
+                "RAM/Temp/FS",
+                IconKind::SysInfo,
             ),
-            tr(l, "Markdown Notes (.md)", "Notatnik Markdown (.md)"),
-            tr(
-                l,
-                "File Explorer (/boot /system /user)",
-                "Eksplorator plików (/boot /system /user)",
+            (
+                tr(l, "2. Notes", "2. Notatki"),
+                ".md Editor",
+                IconKind::Notes,
             ),
-            tr(
-                l,
-                "Media Player (Delta RT Audio)",
-                "Odtwarzacz Media (Delta RT Audio)",
+            (
+                tr(l, "3. Files", "3. Pliki"),
+                "DeltaFS/FAT32",
+                IconKind::Files,
             ),
-            tr(l, "Calculator", "Kalkulator"),
-            tr(l, "Classic Games", "Klasyczne Gry"),
-            tr(l, "Settings", "Ustawienia"),
-            tr(l, "Exit to Shell", "Wyjście do powłoki"),
+            (
+                tr(l, "4. Media RT", "4. Audio RT"),
+                "Priority 110",
+                IconKind::Media,
+            ),
+            (tr(l, "5. Calc", "5. Kalkul."), "+-*/^ sqrt", IconKind::Calc),
+            (
+                tr(l, "6. Games", "6. Gry"),
+                "3 Retro Games",
+                IconKind::Games,
+            ),
+            (
+                tr(l, "7. Settings", "7. Opcje"),
+                "EN/PL/Bright",
+                IconKind::Settings,
+            ),
+            ("8. Hello.hsapp", ".hsapp Bundle", IconKind::Hsapp),
+            (
+                tr(l, "9. Shell", "9. Powłoka"),
+                "delta> CLI",
+                IconKind::Shell,
+            ),
         ];
 
         self.canvas
-            .draw_box(28, 44, 584, 412, gfx::PANEL, gfx::BORDER);
+            .draw_box(24, 40, 592, 420, gfx::PANEL, gfx::BORDER);
         self.canvas.draw_text(
-            48,
-            60,
+            42,
+            54,
             tr(
                 l,
-                "Applications & System (.hsapp)",
-                "Aplikacje i System (.hsapp)",
+                "App Launcher (.hsapp Grid)",
+                "Launcher aplikacji (Siatka .hsapp)",
             ),
             gfx::ACCENT,
         );
 
-        for (idx, label) in items.iter().enumerate() {
-            let y = 92 + (idx as i32) * 38;
+        let notice =
+            core::str::from_utf8(&self.launcher_notice[..self.launcher_notice_len]).unwrap_or("");
+        if !notice.is_empty() {
+            self.canvas.draw_text(380, 54, notice, gfx::OK_GREEN);
+        }
+
+        for (idx, (title, sub, icon)) in items.iter().enumerate() {
+            let col = (idx % 3) as i32;
+            let row = (idx / 3) as i32;
+            let x = 42 + col * 190;
+            let y = 78 + row * 102;
             let selected = idx == self.menu_idx;
             let border = if selected { gfx::ACCENT } else { gfx::BORDER };
             let fill = if selected { gfx::ACCENT_DIM } else { gfx::BG };
-            self.canvas.draw_box(48, y, 544, 30, fill, border);
-            self.canvas.draw_text(64, y + 11, label, gfx::TEXT);
+            self.canvas.draw_box(x, y, 176, 88, fill, border);
+            let icon_col = if selected { gfx::ACCENT } else { gfx::CYAN };
+            draw_icon_2x(&mut self.canvas, x + 72, y + 12, *icon, icon_col);
+            self.canvas.draw_text(x + 14, y + 52, title, gfx::TEXT);
+            let sub_col = if selected { gfx::TEXT } else { gfx::MUTED };
+            self.canvas.draw_text(x + 14, y + 68, sub, sub_col);
         }
 
+        let disc = core::str::from_utf8(&self.discovered_apps[..self.discovered_len]).unwrap_or("");
+        let mut dline = [0u8; 72];
+        let mut dw = BufWriter::new(&mut dline);
+        dw.str(".hsapp: ");
+        dw.str(disc);
+        self.canvas.draw_text(42, 396, dw.as_str(), gfx::CYAN);
+
         self.canvas.draw_text(
-            48,
-            428,
+            42,
+            426,
             tr(
                 l,
-                "[Up/Down] Select  [Enter] Open  [F1] Help  [Q] Shell",
-                "[Góra/Dół] Wybór  [Enter] Otwórz  [F1] Pomoc  [Q] Powłoka",
+                "[Arrows/1-9] Select  [Enter] Launch  [F1] Help  [Q] Shell",
+                "[Strzałki/1-9] Wybór  [Enter] Uruchom  [F1] Pomoc  [Q] Powłoka",
             ),
             gfx::MUTED,
         );

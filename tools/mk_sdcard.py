@@ -279,7 +279,7 @@ def main() -> int:
     sysfs.add_file(
         hello_assets,
         "info.txt",
-        b"Hello.hsapp v0.6.0 (.hsapp bundle verified on System DeltaFS!)",
+        b"Hello.hsapp v0.6.0-rc.1 (.hsapp bundle verified on System DeltaFS!)",
     )
     sysfs.add_file(hello_dir, "icon.png", b"\x89PNG\r\n\x1a\nHELLO_ICON")
     sysfs.add_file(hello_dir, "exec", hello_bytes, b"application/x-elf")
@@ -289,7 +289,7 @@ def main() -> int:
     sysfs.add_file(
         hs_assets,
         "banner.txt",
-        b"Hollow Star OS+ v0.6.0 / Delta Kernel Desktop & 1st Setup",
+        b"Hollow Star OS+ v0.6.0-rc.1 / Delta Kernel Desktop & Launcher",
     )
     sysfs.add_file(hs_dir, "icon.png", b"\x89PNG\r\n\x1a\nHOLLOWSTAR")
     sysfs.add_file(hs_dir, "exec", hollow_bytes, b"application/x-elf")

@@ -76,7 +76,7 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 
 ---
 
-### M6 — Multimedia, DeltaFS & UI *(Ukończony — `v0.6.0`)*
+### M6 — Multimedia, DeltaFS & UI *(Ukończony — `v0.6.0-rc.1`)*
 - **Zakres:**
   - **System plików DeltaFS (`fs/src/deltafs.rs`) + separacja 3 partycji (`tools/mk_sdcard.py`):**
     - Partycja 1 (`0x0C` FAT32) → `/boot` (pliki startowe RPi); Partycja 2 (`0xDF` DeltaFS) → `/system` (`/system/bin/shell.elf`, `/system/apps/*.hsapp`); Partycja 3 (`0xDF` DeltaFS) → `/user` (konfiguracja `os.cfg`, notatki `.md`, media, dane użytkownika).
@@ -86,14 +86,18 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
     - `drv-audio` działa na priorytecie **Real-Time (`110`)**, mieszając dźwięk i obsługując routing Jack 3.5 mm / HDMI oraz głośność `0–100%`.
   - **HAL dla Zero 2 W i adaptacja funkcji (`hal/board-raspi02w`):**
     - Dodano crate `board-raspi02w` współdzielący prymitywy BCM2837/RP3A0 z `board-raspi3b` oraz syscall `GetSysCaps`, dzięki czemu UI automatycznie ukrywa kontrolki Wi-Fi/BT/FTP, gdy moduł radiowy/sterownik jest niedostępny.
-  - **Desktop i aplikacje (`apps/hollow-star` -> `HollowStar.hsapp/exec`):**
+  - **Launcher 2D, Desktop i Aplikacje (`apps/hollow-star` -> `HollowStar.hsapp/exec`) + Skrypt RC1 (`test-rc1.sh`):**
+    - Graficzny **Launcher (.hsapp Grid)** z pikselowymi ikonami `16x16` (`icons.rs`), dynamicznym skanowaniem `/system/apps` i `/user/apps` oraz bezpośrednim uruchamianiem paczek `.hsapp` (np. `Hello.hsapp`).
     - Kreator `1st Setup` (`EN`/`PL` → automatyczne pominięcie Wi-Fi przy braku sterownika → zegar → ekran powitalny z 5-ramienną gwiazdą Hollow Star i zapisem w `/user/config/os.cfg`), uniwersalna pomoc `F1`, `Sys Info` (temperatura, RAM, 3 partycje + rozszerzanie `/user`), `Markdown Notes` (`Ctrl+S` + `Tab` podgląd), `File Explorer`, `Media Player` (Delta RT Audio), `Calculator` (`^`, `sqrt`, `F2` ułamki), klasyczne gry (`Brick Breaker`, `Tetris`, `Racing`) i `Settings`.
-- **Kryterium akceptacji:** zaliczone `./delta.sh ci` (`hal-core` 6 testów + `vfs-server` 2 testy z testem WAL replay i rozszerzania `/user` + `board-raspi02w` clippy), start `HollowStar.hsapp` rendering `640x480` VRAM w QEMU `raspi3b`, ukończenie `1st Setup`, zapis `/user/config/os.cfg` w DeltaFS oraz powrót do interaktywnej powłoki.
+    - Skrypt `./test-rc1.sh` (`--auto` oraz `--gui`) sprawdzający grafikę (VideoCore FB), dźwięk RT (`usb-audio`/`CoreAudio`), sieć (`usb-net` + SLIRP), partycje DeltaFS i App Launcher.
+- **Kryterium akceptacji:** zaliczone `./delta.sh ci` (`hal-core` 6 testów + `vfs-server` 2 testy z testem WAL replay i rozszerzania `/user` + `board-raspi02w` clippy), `./test-rc1.sh --auto` (grafika `640x480`, RT audio, `usb-net`, 3 partycje DeltaFS, Launcher uruchamiający `Hello.hsapp/exec`) oraz powrót do interaktywnej powłoki.
 
 ---
 
-### v1.0.0 — Wydanie produkcyjne i instalator SD *(Następny etap)*
+### v1.0.0 — Wydanie produkcyjne, dokumentacja SDK/LLM i akceleracja 3D (`testing`) *(Następny etap)*
 - **Zakres:**
-  - **Poradnik instalacji na kartę SD:** pełna instrukcja przygotowania karty microSD dla Raspberry Pi 3B oraz Raspberry Pi Zero 2 W (z obrazów CI w GitHub Releases).
-  - **Automatyczne rozszerzanie partycji `/user` przy pierwszym uruchomieniu** oraz przygotowanie finalnych obrazów `.img` (Boot FAT32 + System DeltaFS + User DeltaFS) dla obu płytek (`raspi3b` i `raspi02w`).
-  - **Promocja gałęzi i publikacja:** scalenie `testing -> main`, tag `v1.0.0` oraz publikacja gotowych obrazów dla `raspi3b` i `raspi02w` poprzez GitHub Releases.
+  - **Dokumentacja dla programistów (`docs/DEVELOPER_GUIDE.md`):** kompletny podręcznik tworzenia aplikacji `.hsapp` (ABI syscalli `svc #0`, `libdelta`, VFS/DeltaFS, IPC, priorytety RT audio i kompozytor FB) oraz architektury mikrojądra Delta.
+  - **Pliki kontekstowe dla LLM (`docs/llm/`):** wyspecjalizowane prompty/konteksty dla modeli LLM do szybkiego tworzenia aplikacji `.hsapp` oraz portowania sterowników urządzeń pod `hal-core` / EL0 (`Shm`, MMIO, IRQ forwarding).
+  - **Akceleracja graficzna OpenGL ES / Vulkan (`testing` w `1.0.0`):** wsparcie dla układu **BCM2837 VideoCore IV (`V3D`)** w osobnym serwerze EL0 (`drv-v3d`), obsługa potoku OpenGL ES 2.0 / interfejsu zbliżonego do Vulkan przez `Shm` i DMA.
+  - **Poradnik instalacji na kartę SD i automatyczne rozszerzanie `/user`:** instrukcja flashowania karty microSD dla Raspberry Pi 3B oraz Zero 2 W (Boot FAT32 + System DeltaFS + User DeltaFS z auto-expand przy pierwszym starcie).
+  - **Promocja gałęzi i publikacja:** scalenie `testing -> main`, tag `v1.0.0` oraz publikacja gotowych obrazów `.img` dla `raspi3b` i `raspi02w` poprzez GitHub Releases.

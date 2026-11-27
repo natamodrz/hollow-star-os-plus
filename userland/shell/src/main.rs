@@ -129,10 +129,10 @@ fn execute_command(uart: usize, vfs: usize, cmd: &str) -> bool {
         "help" => {
             libdelta::print_via(
                 uart,
-                "Commands: help, gui, df, ls [path], cat <path>, write <path> <text>, mkdir <path>, rm <path>, run <elf>, uname, exit\n",
+                "Commands: help, gui, launcher, df, ls [path], cat <path>, write <path> <text>, mkdir <path>, rm <path>, run <elf>, uname, exit\n",
             );
         }
-        "gui" => {
+        "gui" | "launcher" => {
             if let Ok(pid) =
                 libdelta::spawn_from_vfs("hollowstar", "/system/apps/HollowStar.hsapp/exec")
             {

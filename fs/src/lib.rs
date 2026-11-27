@@ -348,7 +348,14 @@ impl VfsRouter {
 
     fn proc_content(&self, name: &str) -> Option<&'static [u8]> {
         match name {
-            "version" => Some(b"Hollow Star OS+ v0.6.0 (Delta Kernel / AArch64)\n"),
+            "version" => Some(
+                concat!(
+                    "Hollow Star OS+ v",
+                    env!("CARGO_PKG_VERSION"),
+                    " (Delta Kernel / AArch64)\n"
+                )
+                .as_bytes(),
+            ),
             "mounts" => {
                 if self.has_system() && self.has_user() {
                     Some(
