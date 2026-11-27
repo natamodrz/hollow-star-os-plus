@@ -14,7 +14,8 @@ hollow-star-os-plus/
 ├── run-qemu.sh               # Wrapper uruchamiający obraz w qemu-system-aarch64 (-M raspi3b)
 ├── tools/
 │   ├── mk_sdcard.py          # Generator obrazu SD dla QEMU (/boot FAT32/VFAT + /system DeltaFS + /user DeltaFS)
-│   └── mk_hw_image.py        # Builder lokalnych obrazów sprzętowych .img z firmware RPi (bez releases/GH Release)
+│   ├── mk_hw_image.py        # Builder lokalnych obrazów sprzętowych .img z firmware RPi (bez releases/GH Release)
+│   └── flash_sd.py           # Wieloplatformowy (macOS / Linux) detektor dysków i bezpieczny flasher kart SD
 ├── docs/
 │   ├── architecture.md       # Specyfikacja IPC, Shm, capabilities i mikrojądra Delta
 │   ├── scheduler.md          # Projekt planisty inspirowanego BeOS

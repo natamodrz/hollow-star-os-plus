@@ -2,19 +2,36 @@
 set -euo pipefail
 
 # ==============================================================================
-# Hollow Star OS+ — Local Real-Hardware Test Image Builder
-# Builds a bootable microSD image locally inside `target/` (NEVER `releases/`
-# and NEVER pushes to GitHub Releases) for Raspberry Pi 3B / Zero 2 W.
+# Hollow Star OS+ — Automated Local Hardware Test Image Builder & SD Flasher
+# - Auto-detects host OS (macOS / Linux)
+# - Builds kernel, EL0 userland, .dkex/.dylib, and 3-partition SD .img in target/
+# - Lists all host disks safely and lets you select which disk/SD card to flash
 # ==============================================================================
 
-export PATH="/Users/nataniel/.cargo/bin:/opt/homebrew/bin:$PATH"
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-BOARD="${BOARD:-raspi3b}"       # raspi3b | raspi02w
-UART="${UART:-pl011}"           # pl011 | mini
-SIZE_MB="${SIZE_MB:-128}"       # Total .img size in MiB
+BOARD="raspi3b"
+UART="pl011"
+BOARD_SET=0
+UART_SET=0
+SIZE_MB="${SIZE_MB:-128}"
 FIRMWARE_DIR="${FIRMWARE_DIR:-target/rpi-firmware}"
 SKIP_FW_DOWNLOAD="${SKIP_FW_DOWNLOAD:-0}"
 OUT_IMG=""
+NO_FLASH=0
+TARGET_DISK=""
+YES_FLASH=0
+LIST_ONLY=0
+
+HOST_OS="$(uname -s)"
+case "$HOST_OS" in
+  Darwin) OS_LABEL="macOS (Darwin)" ;;
+  Linux)  OS_LABEL="Linux" ;;
+  *)
+    echo "[hw-image] Nieobsługiwany system operacyjny: $HOST_OS (wymagany macOS lub Linux)." >&2
+    exit 1
+    ;;
+esac
 
 usage() {
   cat <<EOF
@@ -27,26 +44,75 @@ Opcje:
   --firmware-dir <katalog>      Katalog z bootcode.bin/start.elf/fixup.dat/dtb
   --skip-firmware-download      Nie pobieraj firmware RPi z sieci (np. tryb offline)
   --out <target/...img>         Ścieżka wyjściowa (wyłącznie wewnątrz target/)
+  --disk <dev>                  Docelowy dysk do zapisu (np. /dev/disk4 lub /dev/sdb)
+  --yes                         Pomiń pytanie potwierdzające przed zapisem na --disk
+  --no-flash                    Tylko zbuduj obraz .img bez pytania o zapis na kartę
+  --list-disks                  Wypisz wykryte dyski i zakończ
   -h, --help                    Pokaż tę pomoc
 
 Przykłady:
-  ./build-test-image.sh --board raspi3b --uart mini
-  ./build-test-image.sh --board raspi02w --uart mini
+  ./build-test-image.sh                         # Tryb w pełni automatyczny / interaktywny
+  ./build-test-image.sh --board raspi3b --no-flash
+  ./build-test-image.sh --board raspi02w --uart mini --disk /dev/disk4
 EOF
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --board) BOARD="$2"; shift 2 ;;
-    --uart) UART="$2"; shift 2 ;;
+    --board) BOARD="$2"; BOARD_SET=1; shift 2 ;;
+    --uart) UART="$2"; UART_SET=1; shift 2 ;;
     --size-mb) SIZE_MB="$2"; shift 2 ;;
     --firmware-dir) FIRMWARE_DIR="$2"; shift 2 ;;
     --skip-firmware-download) SKIP_FW_DOWNLOAD=1; shift ;;
     --out) OUT_IMG="$2"; shift 2 ;;
+    --disk) TARGET_DISK="$2"; shift 2 ;;
+    --yes) YES_FLASH=1; shift ;;
+    --no-flash) NO_FLASH=1; shift ;;
+    --list-disks) LIST_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Nieznana opcja: $1" >&2; usage; exit 1 ;;
   esac
 done
+
+chmod +x tools/flash_sd.py 2>/dev/null || true
+
+if [ "$LIST_ONLY" = "1" ]; then
+  python3 tools/flash_sd.py --list
+  exit 0
+fi
+
+echo "=================================================================="
+echo "  Hollow Star OS+ — Kreator i Flasher Obrazu Karty microSD"
+echo "  Wykryty system: $OS_LABEL"
+echo "=================================================================="
+
+# Interactive board & UART wizard when running in a terminal without explicit flags.
+if [ -t 0 ] && [ -t 1 ] && [ "$NO_FLASH" = "0" ] && [ -z "$TARGET_DISK" ]; then
+  if [ "$BOARD_SET" = "0" ]; then
+    echo ""
+    echo "Wybierz docelową płytkę:"
+    echo "  [1] Raspberry Pi 3B (raspi3b) [domyślna]"
+    echo "  [2] Raspberry Pi Zero 2 W (raspi02w)"
+    printf "Wybór [1]: "
+    read -r b_ans || true
+    case "${b_ans:-1}" in
+      2|raspi02w) BOARD="raspi02w" ;;
+      *) BOARD="raspi3b" ;;
+    esac
+  fi
+  if [ "$UART_SET" = "0" ]; then
+    echo ""
+    echo "Wybierz tryb konsoli diagnostycznej UART (GPIO 14/15):"
+    echo "  [1] PL011 / UART0 (zalecany) [domyślny]"
+    echo "  [2] Mini-UART / UART1 (mini)"
+    printf "Wybór [1]: "
+    read -r u_ans || true
+    case "${u_ans:-1}" in
+      2|mini) UART="mini" ;;
+      *) UART="pl011" ;;
+    esac
+  fi
+fi
 
 case "$BOARD" in
   raspi3b)  BOARD_FEAT="board-raspi3b" ;;
@@ -66,7 +132,8 @@ if [ -z "$OUT_IMG" ]; then
   OUT_IMG="target/hollow-star-os-plus-${BOARD}-${UART}-hw-test.img"
 fi
 
-echo "[hw-image] Kompilacja jądra Delta Kernel (--release, features: $FEATURES)..."
+echo ""
+echo "[hw-image] Kompilacja Delta Kernel + EL0 userland (--release, features: $FEATURES)..."
 cargo build \
   --package kernel \
   --target aarch64-unknown-none \
@@ -104,11 +171,20 @@ if [ "$SKIP_FW_DOWNLOAD" = "1" ]; then
 fi
 
 PYTHONPATH="tools" python3 tools/mk_hw_image.py "${PY_ARGS[@]}"
+echo "[hw-image] Zbudowano obraz: $OUT_IMG"
 
-echo ""
-echo "[hw-image] GOTOWE! Lokalny obraz testowy zapisano w: $OUT_IMG"
-echo "[hw-image] Aby nagrać na kartę microSD na macOS:"
-echo "  1. Sprawdź numer dysku: diskutil list"
-echo "  2. Odmontuj kartę:     diskutil unmountDisk /dev/diskN"
-echo "  3. Zapisz obraz:       sudo dd if=$OUT_IMG of=/dev/rdiskN bs=4m status=progress && sync"
-echo "  4. Wysuń kartę:        diskutil eject /dev/diskN"
+if [ "$NO_FLASH" = "1" ]; then
+  exit 0
+fi
+
+if [ -n "$TARGET_DISK" ]; then
+  FLASH_ARGS=(--image "$OUT_IMG" --disk "$TARGET_DISK")
+  if [ "$YES_FLASH" = "1" ]; then
+    FLASH_ARGS+=(--yes)
+  fi
+  python3 tools/flash_sd.py "${FLASH_ARGS[@]}"
+elif [ -t 0 ] && [ -t 1 ]; then
+  python3 tools/flash_sd.py --image "$OUT_IMG"
+else
+  echo "[hw-image] Tryb nieinteraktywny — aby wgrać obraz na kartę SD, uruchom ./build-test-image.sh bez przekierowania stdin."
+fi
