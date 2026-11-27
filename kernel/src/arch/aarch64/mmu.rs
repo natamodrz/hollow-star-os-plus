@@ -2,12 +2,17 @@
 //! higher-half (`TTBR1_EL1`) kernel paging with W^X section permissions.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use hal_core::{
     MemoryKind, MemoryRegion, PAGE_SIZE, PhysAddr, VirtAddr, mem::align_down, mem::align_up,
 };
 
+use crate::arch;
 use crate::mem::{HIGHER_HALF_OFFSET, KernelLayout, mark_higher_half_active, phys_to_mut_ptr, pmm};
+
+static BOOT_TTBR0_ROOT: AtomicUsize = AtomicUsize::new(0);
+static BOOT_TTBR1_ROOT: AtomicUsize = AtomicUsize::new(0);
 
 const BLOCK_2M: usize = 2 * 1024 * 1024;
 const ENTRIES_PER_TABLE: usize = 512;
@@ -96,17 +101,27 @@ pub fn init(
 
     let dtb_ram_end = dtb_ram.map(|(base, size)| base.saturating_add(size) as usize);
 
-    // Map lower reserved region (`0x0..kernel_start`) as read-only non-exec in both halves
-    // so firmware ATAGs/DTB remain readable without allowing accidental execution.
-    if layout.kernel_start > 0 {
+    // Map page 0 (`0x0..0x1000`) RW+XN for firmware SMP spin-table mailboxes (`0xE0/0xE8/0xF0`),
+    // and `[0x1000..kernel_start)` RO+XN so ATAGs/DTB remain readable without accidental writes.
+    if layout.kernel_start >= PAGE_SIZE {
         map_dual_range(
             ttbr0_root,
             ttbr1_root,
             0,
-            layout.kernel_start,
-            PageAttrs::KernelRoData,
+            PAGE_SIZE,
+            PageAttrs::KernelRwData,
             &mut counters,
         )?;
+        if layout.kernel_start > PAGE_SIZE {
+            map_dual_range(
+                ttbr0_root,
+                ttbr1_root,
+                PAGE_SIZE,
+                layout.kernel_start - PAGE_SIZE,
+                PageAttrs::KernelRoData,
+                &mut counters,
+            )?;
+        }
     }
 
     // Map Delta Kernel sections with strict 4 KiB W^X boundaries.
@@ -186,6 +201,9 @@ pub fn init(
         }
     }
 
+    BOOT_TTBR0_ROOT.store(ttbr0_root.as_usize(), Ordering::Release);
+    BOOT_TTBR1_ROOT.store(ttbr1_root.as_usize(), Ordering::Release);
+
     // SAFETY: Both `ttbr0_root` and `ttbr1_root` are fully populated, valid 4 KiB-aligned
     // L0 page-table hierarchies covering active code, stack, vectors, RAM, and MMIO.
     unsafe {
@@ -193,12 +211,32 @@ pub fn init(
     }
     mark_higher_half_active();
 
+    // Flush root page-table pointers to DRAM PoC so secondary cores with MMU/caches off
+    // can read `BOOT_TTBR0_ROOT` and `BOOT_TTBR1_ROOT` reliably on wakeup.
+    arch::clean_dcache_line(&raw const BOOT_TTBR0_ROOT as usize);
+    arch::clean_dcache_line(&raw const BOOT_TTBR1_ROOT as usize);
+
     Ok(MmuConfig {
         ttbr0_root,
         ttbr1_root,
         pages_mapped_4k: counters.pages_4k,
         blocks_mapped_2m: counters.blocks_2m,
     })
+}
+
+/// Enables the primary core's shared page tables on a newly woken secondary core.
+///
+/// # Safety
+///
+/// Must be called only on a secondary core in EL1 after [`init`] completed on Core 0.
+pub unsafe fn enable_secondary() {
+    let ttbr0 = PhysAddr(BOOT_TTBR0_ROOT.load(Ordering::Acquire));
+    let ttbr1 = PhysAddr(BOOT_TTBR1_ROOT.load(Ordering::Acquire));
+    debug_assert!(ttbr0.as_usize() != 0 && ttbr1.as_usize() != 0);
+    // SAFETY: Primary core initialized `ttbr0`/`ttbr1` and flushed them to DRAM PoC.
+    unsafe {
+        enable_mmu(ttbr0, ttbr1);
+    }
 }
 
 /// Resolves a virtual address to its physical address by walking `root_l0`.

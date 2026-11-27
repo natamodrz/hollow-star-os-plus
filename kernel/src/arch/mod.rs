@@ -5,9 +5,12 @@ pub mod aarch64;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
-    core_id, current_el, enable_irqs, exceptions, halt, mmu, restore_irqs, save_and_disable_irqs,
-    wait_for_event,
+    clean_dcache_line, context, core_id, current_el, enable_irqs, exceptions, halt, mmu,
+    restore_irqs, save_and_disable_irqs, send_event, wait_for_event,
 };
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn clean_dcache_line(_addr: usize) {}
 
 #[cfg(not(target_arch = "aarch64"))]
 pub fn current_el() -> u8 {

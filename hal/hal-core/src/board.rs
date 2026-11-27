@@ -5,6 +5,15 @@ use crate::irq::InterruptController;
 use crate::mem::MemoryRegion;
 use crate::timer::Timer;
 
+/// Errors returned when waking secondary SMP cores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmpError {
+    /// Core index is zero (primary) or exceeds board core count.
+    InvalidCore,
+    /// Board does not support secondary core wakeup.
+    Unsupported,
+}
+
 /// Static metadata describing the active target board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoardInfo {
@@ -45,6 +54,10 @@ pub trait Board {
 
     /// Returns static physical memory & MMIO region descriptors for this board.
     fn memory_regions(&self) -> &[MemoryRegion];
+
+    /// Wakes secondary CPU core `core_id` (`1..cpu_count`) to begin executing at
+    /// physical address `entry_phys`.
+    fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError>;
 
     /// Permanently halts the calling CPU core in a low-power state.
     fn halt(&self) -> !;

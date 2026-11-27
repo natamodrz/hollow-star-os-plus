@@ -90,7 +90,7 @@ Szczegółowy opis wszystkich kamieni milowych znajduje się w [docs/MILESTONES.
 
 - **M1 (Boot & Serial) — ukończony:** szkielet workspace, abstrakcja `hal-core` + `board-raspi3b`, zejście `EL2 -> EL1`, UART (PL011 / Mini-UART), parser DTB, smoke test w QEMU `raspi3b`.
 - **M2 (Memory & Exceptions) — ukończony:** wektory wyjątków `VBAR_EL1`, ARM Generic Timer IRQ (`100 Hz`), PMM `4 KiB`, MMU `TTBR0`/`TTBR1` (wyższa połowa + W^X).
-- **M3 (Delta Scheduler & SMP) — następny etap:** przełączanie kontekstu AArch64, wielowątkowość na 4 rdzeniach Cortex-A53, planista z warstwą RT.
-- **M4 (EL0 & IPC):** przejście do EL0, ABI wywołań systemowych (`svc`), porty IPC, pierwszy proces `init` i serwer UART w userlandzie.
+- **M3 (Delta Scheduler & SMP) — ukończony:** przełączanie kontekstu AArch64 (`CpuContext`), wybudzenie wszystkich 4 rdzeni Cortex-A53 (`_start_secondary` + spin-table), kolejki priorytetowe `1..=120` z warstwą Real-Time i dziedziczeniem priorytetów.
+- **M4 (EL0 & IPC) — następny etap:** przejście do EL0, ABI wywołań systemowych (`svc`), porty IPC, pierwszy proces `init` i serwer UART w userlandzie.
 - **M5 (Storage & VFS):** serwer SD/eMMC, VFS, FAT32, ładowanie plików ELF.
 - **M6 (Multimedia & UI):** kompozytor graficzny (Framebuffer/HDMI), potok audio wykorzystujący priorytety RT, powłoka i aplikacje.

@@ -131,6 +131,36 @@ impl BitmapAllocator {
         None
     }
 
+    fn alloc_contiguous(&mut self, count: usize) -> Option<PhysAddr> {
+        if !self.initialized || count == 0 || self.free_frames < count {
+            return None;
+        }
+        if count == 1 {
+            return self.alloc_frame();
+        }
+
+        let mut run_start = 0usize;
+        let mut run_len = 0usize;
+        for frame in 0..MAX_FRAMES {
+            if !self.is_used(frame) {
+                if run_len == 0 {
+                    run_start = frame;
+                }
+                run_len += 1;
+                if run_len == count {
+                    for f in run_start..(run_start + count) {
+                        self.set_used(f);
+                    }
+                    self.free_frames -= count;
+                    return Some(PhysAddr::from_frame_index(run_start));
+                }
+            } else {
+                run_len = 0;
+            }
+        }
+        None
+    }
+
     fn free_frame(&mut self, addr: PhysAddr) -> Result<(), PmmError> {
         if !addr.is_page_aligned() {
             return Err(PmmError::UnalignedAddress);
@@ -202,6 +232,11 @@ pub fn alloc_zeroed_frame() -> Option<PhysAddr> {
         write_bytes(ptr, 0, PAGE_SIZE);
     }
     Some(frame)
+}
+
+/// Allocates `count` contiguous 4 KiB physical frames (e.g. for kernel thread stacks).
+pub fn alloc_contiguous_frames(count: usize) -> Option<PhysAddr> {
+    PMM.lock().alloc_contiguous(count)
 }
 
 /// Frees a previously allocated 4 KiB physical frame.

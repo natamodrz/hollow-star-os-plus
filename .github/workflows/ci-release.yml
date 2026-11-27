@@ -1,0 +1,82 @@
+name: CI & Release (Hollow Star OS+)
+
+on:
+  push:
+    branches: ["main", "testing"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main", "testing"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build, Clippy, Unit Tests & QEMU Smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install QEMU (aarch64)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-none
+          components: rustfmt,clippy,llvm-tools,rust-src
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run full CI pipeline (fmt, clippy, unit, QEMU debug smoke)
+        run: ./delta.sh ci
+
+      - name: Build & QEMU smoke test (release image)
+        run: PROFILE=release EXPECT_MARKER='Hollow Star OS+' ./delta.sh smoke
+
+      - name: Package release images & checksums
+        run: |
+          mkdir -p build/ci-images
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME}"
+          else
+            VER="${GITHUB_REF_NAME}-$(git rev-parse --short HEAD)"
+          fi
+          cp target/kernel8.img "build/ci-images/hollow-star-os-plus-raspi3b-${VER}.img"
+          (cd build/ci-images && sha256sum *.img > SHA256SUMS.txt)
+          ls -lh build/ci-images
+
+      - name: Upload built images as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hollow-star-os-plus-images
+          path: build/ci-images/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified board images
+        uses: actions/download-artifact@v4
+        with:
+          name: hollow-star-os-plus-images
+          path: build/release-assets
+
+      - name: Create GitHub Release with board images
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Hollow Star OS+ ${{ github.ref_name }}"
+          generate_release_notes: true
+          files: build/release-assets/*

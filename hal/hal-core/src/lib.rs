@@ -13,7 +13,7 @@ pub mod irq;
 pub mod mem;
 pub mod timer;
 
-pub use board::{Board, BoardInfo};
+pub use board::{Board, BoardInfo, SmpError};
 pub use console::{ConsoleWriter, SerialConsole};
 pub use dtb::{Dtb, DtbError, FdtHeader};
 pub use irq::{InterruptController, IrqSource};

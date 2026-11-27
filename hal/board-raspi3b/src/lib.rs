@@ -13,7 +13,9 @@ pub mod timer;
 pub mod uart_mini;
 pub mod uart_pl011;
 
-use hal_core::{Board, BoardInfo, InterruptController, MemoryKind, MemoryRegion, SerialConsole};
+use hal_core::{
+    Board, BoardInfo, InterruptController, MemoryKind, MemoryRegion, SerialConsole, SmpError,
+};
 
 /// BCM2837 peripheral MMIO physical base address on Raspberry Pi 3B.
 pub const PERIPHERAL_BASE: usize = 0x3F00_0000;
@@ -30,6 +32,9 @@ pub const GPIO_BASE: usize = PERIPHERAL_BASE + 0x0020_0000;
 pub const PL011_UART0_BASE: usize = PERIPHERAL_BASE + 0x0020_1000;
 /// BCM2837 AUX (Mini-UART / SPI) base address.
 pub const AUX_BASE: usize = PERIPHERAL_BASE + 0x0021_5000;
+
+/// Physical base of the RPi 3B / QEMU `raspi3b` firmware spin-table mailboxes (`0xD8 + 8 * core`).
+const SPIN_TABLE_BASE: usize = 0xD8;
 
 /// Conservative ARM-accessible physical RAM limit on 1 GiB RPi 3B (948 MiB before VideoCore split).
 pub const DEFAULT_ARM_RAM_SIZE: usize = 0x3B40_0000;
@@ -129,6 +134,33 @@ impl Board for Raspi3bBoard {
 
     fn memory_regions(&self) -> &[MemoryRegion] {
         &RASPI3B_MEMORY_REGIONS
+    }
+
+    fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError> {
+        if core_id == 0 || core_id >= 4 {
+            return Err(SmpError::InvalidCore);
+        }
+
+        let mailbox_addr = SPIN_TABLE_BASE + core_id * core::mem::size_of::<u64>();
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: `mailbox_addr` (`0xE0`/`0xE8`/`0xF0`) is the BCM2837 AArch64 firmware
+        // spin-table slot for secondary core `core_id`, mapped RW in page 0. Flushing
+        // the cache line (`dc civac`) and issuing `dsb sy` + `sev` ensures sleeping cores
+        // with MMU disabled observe `entry_phys` in DRAM and wake up.
+        unsafe {
+            core::ptr::write_volatile(mailbox_addr as *mut u64, entry_phys as u64);
+            core::arch::asm!(
+                "dc civac, {addr}",
+                "dsb sy",
+                "sev",
+                addr = in(reg) mailbox_addr,
+                options(nostack)
+            );
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        let _ = (mailbox_addr, entry_phys);
+
+        Ok(())
     }
 
     fn halt(&self) -> ! {

@@ -49,8 +49,9 @@ Aby uniknąć **inwersji priorytetów** (np. gdy wątek audio RT `110` wysyła s
 
 ## 5. Wsparcie SMP (4x Cortex-A53)
 
-- **Stan M1:** aktywny jest wyłącznie rdzeń `0` (`MPIDR_EL1.Aff0 == 0`); rdzenie `1..=3` są zaparkowane w stanie `wfe`.
-- **Plan na M3:**
-  - Obudzenie rdzeni `1..=3` (spin-table lub PSCI w zależności od platformy/DTB).
-  - Lokalne kolejki gotowych wątków (*per-CPU runqueues*) chronione lekkimi blokadami wirującymi z wyłączonymi przerwaniami (`IrqSpinLock`), minimalizujące rywalizację między rdzeniami.
-  - Wsparcie dla powinowactwa CPU (*CPU affinity*) dla wątków RT oraz periodyczne równoważenie obciążenia (*work stealing* / balansowanie) między rdzeniami.
+- **Stan obecny (M3 zaimplementowane):**
+  - Wybudzanie rdzeni `1..=3` przez warstwę HAL (`Board::wake_secondary_core`, spin-table `0xE0/0xE8/0xF0` + czyszczenie linii cache `dc civac` + `sev` dla `board-raspi3b`) oraz wejście `_start_secondary` (zejście `EL2 -> EL1`, wspólne tablice stron `TTBR0_EL1`/`TTBR1_EL1`, lokalne wektory `VBAR_EL1` i zegar `100 Hz` per rdzeń).
+  - Kontekst AArch64 (`CpuContext`: `x19..x30`, `sp`) i bezpieczne przełączanie `switch_context` z odroczonym zwrotem wątku wychodzącego (`pending_requeue[core]`) chroniącym stosy przed wyścigiem SMP.
+  - Wsparcie dla powinowactwa CPU (`affinity: Option<u8>`), wywłaszczania timerem, `boost_priority` / `clear_priority_boost` (fundament Priority Inheritance) oraz automatycznego zwalniania stosów zakończonych wątków.
+- **Dalszy rozwój (M4+):**
+  - Osobne kolejki per-CPU (*work stealing*) oraz pełna integracja PI z blokowaniem na portach IPC.

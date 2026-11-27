@@ -5,6 +5,7 @@ hollow-star-os-plus/
 ├── README.md                 # Dokumentacja główna projektu (EN, alert vibe-coded, wydania)
 ├── rust-toolchain.toml       # Przypięty toolchain Rust, target aarch64-unknown-none i komponenty
 ├── .cargo/config.toml        # Domyślny target: aarch64-unknown-none + runner QEMU
+├── .github/workflows/        # GitHub Actions CI/CD (testy QEMU + budowanie i publikacja obrazów)
 ├── .gitignore                # Reguły ignorowania artefaktów kompilacji, obrazów i first-prompt.txt
 ├── delta.sh                  # Główny skrypt build/check/unit/smoke/ci
 ├── run-qemu.sh               # Wrapper uruchamiający obraz w qemu-system-aarch64 (-M raspi3b)

@@ -1,5 +1,6 @@
-//! AArch64 architecture support, early boot, exceptions, and MMU.
+//! AArch64 architecture support, early boot, exceptions, MMU, and context switch.
 
+pub mod context;
 pub mod exceptions;
 pub mod mmu;
 
@@ -28,6 +29,19 @@ pub fn core_id() -> u8 {
         asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nomem, nostack, preserves_flags));
     }
     (mpidr & 0xFF) as u8
+}
+
+/// Cleans the data cache line containing `addr` to the Point of Coherency (`dc cvac`).
+pub fn clean_dcache_line(addr: usize) {
+    // SAFETY: `dc cvac` cleans the cache line at `addr` to DRAM PoC without altering contents.
+    unsafe {
+        asm!(
+            "dc cvac, {0}",
+            "dsb sy",
+            in(reg) addr,
+            options(nostack)
+        );
+    }
 }
 
 /// Enables maskable IRQ interrupts on the current CPU core (`DAIF.I = 0`).
@@ -66,6 +80,14 @@ pub fn wait_for_event() {
     // SAFETY: `wfe` yields the core until an event or unmasked interrupt occurs.
     unsafe {
         asm!("wfe", options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Broadcasts a wakeup event to all cores sleeping in `wfe` (`sev`).
+pub fn send_event() {
+    // SAFETY: `sev` wakes cores waiting in `wfe` without modifying memory.
+    unsafe {
+        asm!("sev", options(nomem, nostack, preserves_flags));
     }
 }
 

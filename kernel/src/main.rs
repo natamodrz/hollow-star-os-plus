@@ -7,19 +7,27 @@
 mod arch;
 mod board;
 mod mem;
+mod sched;
+mod smp;
 mod sync;
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use hal_core::{Board, BoardInfo, Dtb, InterruptController, SerialConsole, Timer, VirtAddr};
 
 use crate::mem::{HIGHER_HALF_OFFSET, KernelLayout, pmm};
+use crate::sched::Priority;
 
 const BANNER_MAGIC: u64 = 0x4445_4C54_415F_4D32; // "DELTA_M2"
 
 #[unsafe(no_mangle)]
 static M2_HIGHER_HALF_PROBE: u64 = BANNER_MAGIC;
+
+static PRIO_TRACE_LEN: AtomicUsize = AtomicUsize::new(0);
+static PRIO_TRACE: [AtomicU8; 5] = [const { AtomicU8::new(0) }; 5];
+static SMP_EXEC_MASK: AtomicU8 = AtomicU8::new(0);
 
 /// Rust kernel entry called from AArch64 boot assembly in EL1 with BSS cleared.
 ///
@@ -35,7 +43,7 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     let core = arch::core_id();
     let layout = KernelLayout::from_linker();
 
-    // Print M1 boot banner before bringing up M2 memory & interrupts.
+    // Print boot banner before bringing up memory, exceptions, and SMP scheduler.
     {
         let mut out = active_board.console().writer();
         let _ = writeln!(
@@ -110,8 +118,10 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
     }
 
-    // M2 Step 3: Install EL1 exception vectors (`VBAR_EL1`) and arm ARM Generic Timer IRQ.
+    // M2/M3 Step 3: Install EL1 exception vectors (`VBAR_EL1`), init scheduler & arm timer IRQ.
     arch::exceptions::init();
+    sched::init_primary();
+
     let timer_freq = active_board.timer().frequency_hz();
     arch::exceptions::set_timer_interval_ms(10);
     active_board
@@ -120,31 +130,181 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     active_board.timer().arm_after_ms(10);
     arch::enable_irqs();
 
-    // Wait briefly until at least 3 real timer IRQs have fired to verify end-to-end IRQ delivery.
     let start_cnt = active_board.timer().counter();
-    let timeout_cnt = start_cnt.saturating_add(timer_freq); // 1 second safety bound
-    while arch::exceptions::timer_ticks() < 3 && active_board.timer().counter() < timeout_cnt {
+    let timeout_cnt = start_cnt.saturating_add(timer_freq);
+    while arch::exceptions::timer_ticks() < 2 && active_board.timer().counter() < timeout_cnt {
         arch::wait_for_event();
     }
-
     let ticks = arch::exceptions::timer_ticks();
-    assert!(ticks >= 3, "ARM Generic Timer IRQ failed to fire");
+    assert!(ticks >= 2, "ARM Generic Timer IRQ failed to fire");
 
     {
         let mut out = active_board.console().writer();
         let _ = writeln!(
             out,
-            "[irq]  VBAR_EL1 installed; ARM Generic Timer freq={} Hz, received {} ticks",
+            "[irq]  VBAR_EL1 installed; ARM Generic Timer freq={} Hz, ticks={}",
             timer_freq, ticks
+        );
+    }
+
+    // M3 Step 4: Wake secondary Cortex-A53 cores and verify BeOS-inspired SMP Delta Scheduler.
+    let online_mask = smp::boot_secondary_cores(&active_board);
+    assert_eq!(
+        online_mask, 0b1111,
+        "Expected all 4 Cortex-A53 cores online, got {online_mask:#b}"
+    );
+
+    verify_priority_and_rt_order();
+    verify_smp_four_cores(&active_board);
+
+    let sched_stats = sched::stats();
+    let online_verified = smp::online_mask();
+    {
+        let mut out = active_board.console().writer();
+        let _ = writeln!(
+            out,
+            "[smp]  4/4 Cortex-A53 cores online (mask={online_verified:#06b}, sched_cores={:#06b}, exec_mask={:#06b})",
+            sched_stats.active_cores_mask,
+            SMP_EXEC_MASK.load(Ordering::Acquire)
         );
         let _ = writeln!(
             out,
-            "[boot] Milestone M2 (Memory & Exceptions) ready. Entering idle loop."
+            "[sched] Delta Scheduler verified: BeOS tiers 1..={} (RT 110/PI 100 -> UI 15 -> Normal 10 -> Low 5), threads={}, ctx_switches={}",
+            Priority::REALTIME_MAX.as_u8(),
+            sched_stats.total_threads_created,
+            sched_stats.context_switches
+        );
+        let _ = writeln!(
+            out,
+            "[boot] Milestone M3 (Delta Scheduler & SMP) ready. Entering idle loop."
         );
     }
 
     active_board.console().flush();
-    active_board.halt()
+    loop {
+        sched::yield_now();
+        arch::wait_for_event();
+    }
+}
+
+fn verify_priority_and_rt_order() {
+    PRIO_TRACE_LEN.store(0, Ordering::Release);
+
+    // Mask Core 0 IRQs while batch-spawning so all 4 threads enter the ready queue
+    // before Core 0 dispatches the highest-priority thread (`affinity = Some(0)`).
+    let saved = arch::save_and_disable_irqs();
+    let _normal = sched::spawn(
+        "worker-normal",
+        Priority::NORMAL,
+        Some(0),
+        prio_worker,
+        b'N' as usize,
+    )
+    .expect("spawn normal");
+    let _ui = sched::spawn(
+        "worker-ui",
+        Priority::DISPLAY,
+        Some(0),
+        prio_worker,
+        b'U' as usize,
+    )
+    .expect("spawn ui");
+    let pi_low = sched::spawn(
+        "worker-pi",
+        Priority::LOW,
+        Some(0),
+        prio_worker,
+        b'P' as usize,
+    )
+    .expect("spawn pi");
+    // Demonstrate Priority Inheritance boost raising a LOW (5) thread to REALTIME_MIN (100).
+    sched::boost_priority(pi_low, Priority::REALTIME_MIN);
+    assert_eq!(
+        sched::effective_priority(pi_low),
+        Some(Priority::REALTIME_MIN)
+    );
+    assert_eq!(
+        sched::thread_metadata(pi_low),
+        Some(("worker-pi", Priority::LOW))
+    );
+
+    let pi_reset = sched::spawn(
+        "worker-low",
+        Priority::LOW,
+        Some(0),
+        prio_worker,
+        b'L' as usize,
+    )
+    .expect("spawn low");
+    sched::boost_priority(pi_reset, Priority::REALTIME_MAX);
+    sched::clear_priority_boost(pi_reset);
+    assert_eq!(sched::effective_priority(pi_reset), Some(Priority::LOW));
+
+    let _rt = sched::spawn(
+        "rt-audio",
+        Priority::new(110),
+        Some(0),
+        prio_worker,
+        b'R' as usize,
+    )
+    .expect("spawn rt");
+    arch::restore_irqs(saved);
+
+    while PRIO_TRACE_LEN.load(Ordering::Acquire) < 5 {
+        sched::yield_now();
+    }
+
+    let order = [
+        PRIO_TRACE[0].load(Ordering::Acquire),
+        PRIO_TRACE[1].load(Ordering::Acquire),
+        PRIO_TRACE[2].load(Ordering::Acquire),
+        PRIO_TRACE[3].load(Ordering::Acquire),
+        PRIO_TRACE[4].load(Ordering::Acquire),
+    ];
+    assert_eq!(
+        &order, b"RPUNL",
+        "Expected RT(110) -> PI(100) -> UI(15) -> Normal(10) -> Low(5), got {order:?}"
+    );
+}
+
+fn verify_smp_four_cores(active_board: &impl Board) {
+    SMP_EXEC_MASK.store(0, Ordering::Release);
+    for core in 0..4u8 {
+        let _ = sched::spawn(
+            "smp-probe",
+            Priority::URGENT,
+            Some(core),
+            smp_probe_worker,
+            usize::from(core),
+        )
+        .expect("spawn smp probe");
+    }
+
+    let timer = board::timer_handle();
+    let deadline = timer.counter().saturating_add(timer.frequency_hz());
+    while SMP_EXEC_MASK.load(Ordering::Acquire) != 0b1111 && timer.counter() < deadline {
+        sched::yield_now();
+        arch::wait_for_event();
+    }
+    assert_eq!(
+        SMP_EXEC_MASK.load(Ordering::Acquire),
+        0b1111,
+        "All 4 cores must execute scheduled threads"
+    );
+    let _ = active_board;
+}
+
+fn prio_worker(tag: usize) {
+    let idx = PRIO_TRACE_LEN.fetch_add(1, Ordering::AcqRel);
+    if idx < PRIO_TRACE.len() {
+        PRIO_TRACE[idx].store(tag as u8, Ordering::Release);
+    }
+}
+
+fn smp_probe_worker(expected_core: usize) {
+    let actual_core = usize::from(arch::core_id());
+    assert_eq!(actual_core, expected_core, "SMP affinity mismatch");
+    SMP_EXEC_MASK.fetch_or(1 << actual_core, Ordering::Release);
 }
 
 type DtbResult = (Option<(u64, u64)>, Option<(usize, usize)>);

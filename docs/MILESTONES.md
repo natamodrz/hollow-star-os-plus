@@ -12,8 +12,8 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 | :--- | :--- | :--- | :--- |
 | **M1** | Boot & Serial | Ukończony | Zejście `EL2 -> EL1`, BSS, `hal-core` + `board-raspi3b`, baner UART, parser DTB |
 | **M2** | Memory & Exceptions | Ukończony | Wektory wyjątków `VBAR_EL1`, ARM Generic Timer IRQ, PMM (4 KiB), MMU (`TTBR0`/`TTBR1`) |
-| **M3** | Delta Scheduler & SMP | Następny etap | Przełączanie kontekstu AArch64, wielowątkowość na 4 rdzeniach Cortex-A53, priorytety `1..=120` + RT |
-| **M4** | EL0 & IPC | Planowany | Przestrzeń użytkownika `EL0`, ABI `svc`, porty IPC z capabilities, `init` + `drv-uart` |
+| **M3** | Delta Scheduler & SMP | Ukończony | Przełączanie kontekstu AArch64, wielowątkowość na 4 rdzeniach Cortex-A53, priorytety `1..=120` + RT |
+| **M4** | EL0 & IPC | Następny etap | Przestrzeń użytkownika `EL0`, ABI `svc`, porty IPC z capabilities, `init` + `drv-uart` |
 | **M5** | Storage & VFS | Planowany | Serwer SD/eMMC (`drv-sd`), VFS w EL0, FAT32 / ext2, ładowanie plików ELF |
 | **M6** | Multimedia & UI | Planowany | Kompozytor Framebuffer/HDMI (`drv-fb`), audio RT (`drv-audio`), `1st Setup`, `EN/PL`, aplikacje |
 
@@ -42,13 +42,13 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 
 ---
 
-### M3 — Delta Scheduler & SMP
+### M3 — Delta Scheduler & SMP *(Ukończony)*
 - **Zakres:**
-  - Przełączanie kontekstu AArch64 (`callee-saved` `x19..x30`, `SP`, `TPIDR_EL1`, opcjonalnie stan FP/SIMD).
-  - Struktura `Thread` i kolejek gotowych z priorytetami `1..=120` (Idle `1`, Low `2..=9`, Normal `10`, UI `15`, Urgent `20`, Real-Time `100..=120`).
-  - Wybudzenie rdzeni `1..=3` Cortex-A53 (spin-table / mailbox startowy) oraz per-CPU runqueues chronione `IrqSpinLock`.
+  - Przełączanie kontekstu AArch64 (`CpuContext`: `x19..x30`, `sp` w `context.S` + `thread_entry_trampoline`) z bezpiecznym, wolnym od wyścigów odroczonym zwrotem wątku wychodzącego (`pending_requeue`).
+  - Struktura `ThreadControlBlock` oraz kolejka priorytetowa w skali BeOS `1..=120` (`Idle 1`, `Low 5`, `Normal 10`, `Display 15`, `Urgent 20`, `Real-Time 100..=120`), obsługa `boost_priority` / `clear_priority_boost` i zwalnianie stosów po zakończeniu wątku.
+  - Wybudzenie rdzeni `1..=3` Cortex-A53 (`Board::wake_secondary_core`, spin-table `0xE0/0xE8/0xF0` + `dc civac` + `sev`, `_start_secondary` z wspólnym MMU `TTBR0`/`TTBR1`, `VBAR_EL1` i zegarem `100 Hz` per rdzeń).
   - Preempting z niskim opóźnieniem na ticku timera oraz priorytetowe kolejkowanie wątków RT.
-- **Kryterium akceptacji:** wielowątkowy test w QEMU `raspi3b` (`-smp 4`) pokazujący działanie wątków na wszystkich 4 rdzeniach i natychmiastowe wywłaszczanie przez wątek RT.
+- **Kryterium akceptacji:** zaliczone `./delta.sh ci` oraz test w QEMU `raspi3b` potwierdzający uruchomienie `4/4` rdzeni Cortex-A53 (`exec_mask=0b1111`) i ścisłą kolejność `RT(110) -> PI(100) -> UI(15) -> Normal(10) -> Low(5)`.
 
 ---
 

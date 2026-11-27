@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use hal_core::{InterruptController, IrqSource, SerialConsole, Timer};
 
-use crate::{arch, board};
+use crate::{arch, board, sched};
 
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(include_str!("vectors.S"));
@@ -66,6 +66,7 @@ extern "C" fn rust_irq_handler(_tf: &mut TrapFrame, _kind: u64) {
             let interval_ms = TIMER_TICK_MS.load(Ordering::Acquire);
             board::timer_handle().arm_after_ms(interval_ms);
             TIMER_TICKS.fetch_add(1, Ordering::Release);
+            sched::on_timer_tick(core);
         }
         IrqSource::None => {}
         other => {

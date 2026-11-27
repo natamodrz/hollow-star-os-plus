@@ -1,14 +1,16 @@
 // AArch64 early boot entry for Delta Kernel (Raspberry Pi 3B / Cortex-A53).
-// Entered at _start (0x80000) with x0 = DTB physical address (or 0 if omitted).
+// Primary core enters `_start` at 0x80000 with x0 = DTB physical address (or 0).
+// Secondary cores wake from firmware spin-table at `_start_secondary`.
 
 .section .text.boot, "ax"
 .global _start
+.global _start_secondary
 
 _start:
     // Preserve firmware/QEMU DTB pointer across early EL setup.
     mov x19, x0
 
-    // Park secondary Cortex-A53 cores (MPIDR_EL1.Aff0 != 0) until M3 SMP wakeup.
+    // Park any unexpected secondary core entering `_start`; SMP wakeup uses `_start_secondary`.
     mrs x0, mpidr_el1
     and x0, x0, #0xFF
     cbnz x0, .Lpark_core
@@ -63,8 +65,7 @@ _start:
     eret
 
 .Lel1_ready:
-    // Enable FP/SIMD instructions in EL1 (CPACR_EL1.FPEN = 0b11, bits [21:20])
-    // so Rust core::fmt / compiler-generated NEON ops never trap.
+    // Enable FP/SIMD instructions in EL1 (CPACR_EL1.FPEN = 0b11, bits [21:20]).
     mov x0, #(0x3 << 20)
     msr cpacr_el1, x0
     isb
@@ -89,6 +90,71 @@ _start:
     // Enter Rust kernel_main(dtb_ptr: usize).
     mov  x0, x19
     bl   kernel_main
+    b    .Lpark_core
+
+// Secondary core entry jumped to from firmware spin-table (`0xE0`/`0xE8`/`0xF0`).
+_start_secondary:
+    mrs x19, mpidr_el1
+    and x19, x19, #0xFF
+    cbz x19, .Lpark_core
+    cmp x19, #4
+    b.hs .Lpark_core
+
+    mrs x0, CurrentEL
+    lsr x0, x0, #2
+    and x0, x0, #0x3
+
+    cmp x0, #3
+    b.eq .Lsec_from_el3
+    cmp x0, #2
+    b.eq .Lsec_from_el2
+    b .Lsec_el1_ready
+
+.Lsec_from_el3:
+    mov x0, #0x581
+    msr scr_el3, x0
+    mov x0, #0x3C9
+    msr spsr_el3, x0
+    adr x0, .Lsec_from_el2
+    msr elr_el3, x0
+    isb
+    eret
+
+.Lsec_from_el2:
+    mov x0, #(1 << 31)
+    msr hcr_el2, x0
+
+    mrs x0, cnthctl_el2
+    orr x0, x0, #0x3
+    msr cnthctl_el2, x0
+    msr cntvoff_el2, xzr
+
+    mrs x0, cptr_el2
+    bic x0, x0, #(1 << 10)
+    bic x0, x0, #(1 << 31)
+    msr cptr_el2, x0
+
+    mov x0, #0x3C5
+    msr spsr_el2, x0
+    adr x0, .Lsec_el1_ready
+    msr elr_el2, x0
+    isb
+    eret
+
+.Lsec_el1_ready:
+    mov x0, #(0x3 << 20)
+    msr cpacr_el1, x0
+    isb
+
+    // Load per-core stack top prepared and cache-cleaned by Core 0.
+    adrp x0, SECONDARY_STACK_TOPS
+    add  x0, x0, :lo12:SECONDARY_STACK_TOPS
+    ldr  x0, [x0, x19, lsl #3]
+    cbz  x0, .Lpark_core
+    mov  sp, x0
+
+    mov  x0, x19
+    bl   secondary_kernel_main
 
 .Lpark_core:
     wfe
