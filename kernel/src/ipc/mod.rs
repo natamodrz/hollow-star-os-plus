@@ -7,11 +7,11 @@ use crate::sched::{self, Priority, ThreadId};
 use crate::sync::IrqSpinLock;
 use crate::{board, proc};
 
-const MAX_PORTS: usize = 32;
+const MAX_PORTS: usize = 48;
 const PORT_QUEUE_CAP: usize = 16;
 const MAX_WAITERS: usize = 8;
 const MAX_SERVICES: usize = 16;
-const MAX_CAPS_TOTAL: usize = 256;
+const MAX_CAPS_TOTAL: usize = 384;
 const MAX_IRQ_LINES: usize = 128;
 
 #[derive(Clone, Copy)]

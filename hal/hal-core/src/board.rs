@@ -29,6 +29,10 @@ pub struct BoardInfo {
     pub ram_base: usize,
     /// Default physical RAM size in bytes when no DTB overrides it.
     pub ram_size_bytes: usize,
+    /// Whether an active Wi-Fi driver/radio capability is available on this board/build.
+    pub has_wifi: bool,
+    /// Whether an active Bluetooth driver/radio capability is available on this board/build.
+    pub has_bluetooth: bool,
 }
 
 /// Platform abstraction decoupling `kernel/` from board-specific hardware details.
@@ -62,6 +66,24 @@ pub trait Board {
     /// Returns `(mmio_region, irq_num)` for the board's SD/eMMC controller so the
     /// userspace storage driver (`drv-sd`) can run in EL0 with IRQ forwarding.
     fn sd_mmio_region(&self) -> Option<(MemoryRegion, u32)>;
+
+    /// Returns the Mailbox/display-control MMIO region + VideoCore bus alias offset
+    /// (`(region, vc_bus_offset)`) for the userspace display driver (`drv-fb`).
+    fn mailbox_mmio_region(&self) -> Option<(MemoryRegion, usize)> {
+        None
+    }
+
+    /// Returns the physical VideoCore / framebuffer aperture `(base, size)` allowed to be
+    /// mapped by the isolated EL0 display driver (`drv-fb`).
+    fn framebuffer_phys_window(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Returns the board audio hardware MMIO region (e.g. PWM/I2S) for the userspace
+    /// real-time audio server (`drv-audio`).
+    fn audio_mmio_region(&self) -> Option<MemoryRegion> {
+        None
+    }
 
     /// Wakes secondary CPU core `core_id` (`1..cpu_count`) to begin executing at
     /// physical address `entry_phys`.

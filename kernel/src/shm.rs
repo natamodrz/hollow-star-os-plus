@@ -8,8 +8,8 @@ use crate::mem::pmm;
 use crate::proc;
 use crate::sync::IrqSpinLock;
 
-const MAX_SHM_REGIONS: usize = 32;
-const MAX_SHM_PAGES: usize = 64; // up to 256 KiB per shared buffer
+const MAX_SHM_REGIONS: usize = 24;
+const MAX_SHM_PAGES: usize = 320; // up to 1.25 MiB per shared buffer (covers 640x480x4 FB)
 const MAX_SHM_PEERS: usize = 8;
 
 #[derive(Clone, Copy)]
@@ -78,15 +78,31 @@ pub fn create(owner_pid: u64, ttbr0: PhysAddr, size_bytes: usize) -> Result<(u64
     let num_pages = align_up(size_bytes, PAGE_SIZE) / PAGE_SIZE;
     let base_va = proc::alloc_shm_va(owner_pid, num_pages).ok_or(errno::ENOMEM)?;
 
-    let mut frames = [PhysAddr(0); MAX_SHM_PAGES];
+    let mut table = SHM.lock();
+    let Some(slot) = table.regions.iter().position(|r| !r.in_use) else {
+        return Err(errno::ENOMEM);
+    };
+
+    let id = table.next_id;
+    table.next_id += 1;
+    let region = &mut table.regions[slot];
+    *region = ShmRegion::empty();
+    region.in_use = true;
+    region.id = id;
+    region.owner_pid = owner_pid;
+    region.size_bytes = size_bytes;
+    region.num_pages = num_pages;
+
     for i in 0..num_pages {
         let Some(frame) = pmm::alloc_zeroed_frame() else {
-            for frame_to_free in frames.iter().take(i) {
-                let _ = pmm::free_frame(*frame_to_free);
+            for (j, old_frame) in region.frames.iter().enumerate().take(i) {
+                let _ = mmu::unmap_user_page(ttbr0, VirtAddr(base_va + j * PAGE_SIZE));
+                let _ = pmm::free_frame(*old_frame);
             }
+            region.in_use = false;
             return Err(errno::ENOMEM);
         };
-        frames[i] = frame;
+        region.frames[i] = frame;
         if mmu::map_user_page(
             ttbr0,
             VirtAddr(base_va + i * PAGE_SIZE),
@@ -98,38 +114,19 @@ pub fn create(owner_pid: u64, ttbr0: PhysAddr, size_bytes: usize) -> Result<(u64
             for j in 0..i {
                 let _ = mmu::unmap_user_page(ttbr0, VirtAddr(base_va + j * PAGE_SIZE));
             }
-            for frame_to_free in frames.iter().take(i + 1) {
-                let _ = pmm::free_frame(*frame_to_free);
+            for old_frame in region.frames.iter().take(i + 1) {
+                let _ = pmm::free_frame(*old_frame);
             }
+            region.in_use = false;
             return Err(errno::ENOMEM);
         }
     }
 
-    let mut table = SHM.lock();
-    let Some(slot) = table.regions.iter().position(|r| !r.in_use) else {
-        drop(table);
-        for (i, frame) in frames.iter().enumerate().take(num_pages) {
-            let _ = mmu::unmap_user_page(ttbr0, VirtAddr(base_va + i * PAGE_SIZE));
-            let _ = pmm::free_frame(*frame);
-        }
-        return Err(errno::ENOMEM);
-    };
-
-    let id = table.next_id;
-    table.next_id += 1;
-    let mut region = ShmRegion::empty();
-    region.in_use = true;
-    region.id = id;
-    region.owner_pid = owner_pid;
-    region.size_bytes = size_bytes;
-    region.num_pages = num_pages;
-    region.frames = frames;
     region.mappings[0] = Some(ShmMapping {
         pid: owner_pid,
         ttbr0,
         va: base_va,
     });
-    table.regions[slot] = region;
 
     Ok((id, base_va))
 }
@@ -159,7 +156,7 @@ pub fn allow_pid(owner_pid: u64, shm_id: u64, target_pid: u64) -> Result<(), isi
 
 /// Maps an authorized `shm_id` into `caller_pid`'s `TTBR0` and returns `(va, size_bytes)`.
 pub fn map(caller_pid: u64, ttbr0: PhysAddr, shm_id: u64) -> Result<(usize, usize), isize> {
-    let (num_pages, size_bytes, frames) = {
+    let num_pages = {
         let table = SHM.lock();
         let region = table
             .regions
@@ -177,11 +174,19 @@ pub fn map(caller_pid: u64, ttbr0: PhysAddr, shm_id: u64) -> Result<(usize, usiz
         {
             return Ok((existing.va, region.size_bytes));
         }
-        (region.num_pages, region.size_bytes, region.frames)
+        region.num_pages
     };
 
     let base_va = proc::alloc_shm_va(caller_pid, num_pages).ok_or(errno::ENOMEM)?;
-    for (i, frame) in frames.iter().take(num_pages).enumerate() {
+    let mut table = SHM.lock();
+    let region = table
+        .regions
+        .iter_mut()
+        .find(|r| r.in_use && r.id == shm_id)
+        .ok_or(errno::ENOENT)?;
+    let size_bytes = region.size_bytes;
+
+    for (i, frame) in region.frames.iter().enumerate().take(num_pages) {
         if mmu::map_user_page(
             ttbr0,
             VirtAddr(base_va + i * PAGE_SIZE),
@@ -197,12 +202,6 @@ pub fn map(caller_pid: u64, ttbr0: PhysAddr, shm_id: u64) -> Result<(usize, usiz
         }
     }
 
-    let mut table = SHM.lock();
-    let region = table
-        .regions
-        .iter_mut()
-        .find(|r| r.in_use && r.id == shm_id)
-        .ok_or(errno::ENOENT)?;
     let map_slot = region
         .mappings
         .iter_mut()
@@ -219,40 +218,33 @@ pub fn map(caller_pid: u64, ttbr0: PhysAddr, shm_id: u64) -> Result<(usize, usiz
 
 /// Unmaps `shm_id` from `caller_pid` and frees backing physical frames when unreferenced.
 pub fn unmap(caller_pid: u64, shm_id: u64) -> Result<(), isize> {
-    let mut frames_to_free: Option<(usize, [PhysAddr; MAX_SHM_PAGES])> = None;
-    let unmap_info = {
-        let mut table = SHM.lock();
-        let region = table
-            .regions
-            .iter_mut()
-            .find(|r| r.in_use && r.id == shm_id)
-            .ok_or(errno::ENOENT)?;
+    let mut table = SHM.lock();
+    let region = table
+        .regions
+        .iter_mut()
+        .find(|r| r.in_use && r.id == shm_id)
+        .ok_or(errno::ENOENT)?;
 
-        let mut removed: Option<ShmMapping> = None;
-        for slot in &mut region.mappings {
-            if slot.is_some_and(|m| m.pid == caller_pid) {
-                removed = slot.take();
-                break;
-            }
+    let mut removed: Option<ShmMapping> = None;
+    for slot in &mut region.mappings {
+        if slot.is_some_and(|m| m.pid == caller_pid) {
+            removed = slot.take();
+            break;
         }
-        let mapping = removed.ok_or(errno::ENOENT)?;
-        let num_pages = region.num_pages;
+    }
+    let mapping = removed.ok_or(errno::ENOENT)?;
+    let num_pages = region.num_pages;
 
-        if !region.has_mappings() {
-            frames_to_free = Some((num_pages, region.frames));
-            region.in_use = false;
-        }
-        (mapping, num_pages)
-    };
-
-    let (mapping, num_pages) = unmap_info;
     for i in 0..num_pages {
         let _ = mmu::unmap_user_page(mapping.ttbr0, VirtAddr(mapping.va + i * PAGE_SIZE));
     }
-    if let Some((count, frames)) = frames_to_free {
-        for frame in frames.iter().take(count) {
+
+    if !region.has_mappings() {
+        for frame in region.frames.iter_mut().take(num_pages) {
             let _ = pmm::free_frame(*frame);
+            *frame = PhysAddr(0);
         }
+        region.in_use = false;
     }
 
     Ok(())

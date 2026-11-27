@@ -1,0 +1,14 @@
+[package]
+name = "drv-fb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Userspace (EL0) VideoCore Mailbox Framebuffer driver server for Hollow Star OS+"
+
+[[bin]]
+name = "drv-fb"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }

@@ -1,0 +1,15 @@
+[package]
+name = "hollow-star-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hollow Star OS+ Desktop Compositor, 1st Setup, and Core Apps (.hsapp)"
+
+[[bin]]
+name = "hollow-star"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }

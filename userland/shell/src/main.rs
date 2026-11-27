@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 
-//! Unix-like EL0 Shell (`shell.elf`) loaded dynamically from FAT32 SD storage.
+//! Unix-like EL0 Shell (`/system/bin/shell.elf`) loaded dynamically from DeltaFS System partition.
 
-use libdelta::delta_abi::{IpcMessage, MSG_UART_READ, SVC_UART, SVC_VFS};
+use libdelta::delta_abi::{IpcMessage, MSG_UART_READ, SVC_UART, SVC_VFS, VfsPartitionStat};
 
 #[unsafe(no_mangle)]
 fn delta_main() -> usize {
@@ -12,65 +12,66 @@ fn delta_main() -> usize {
 
     libdelta::print_via(
         uart,
-        "[el0/shell] Loaded /BIN/shell.elf from FAT32 SD card!\n",
+        "[el0/shell] Loaded /system/bin/shell.elf from DeltaFS System partition!\n",
     );
 
-    if run_m5_storage_checks(uart, vfs).is_err() {
-        libdelta::print_via(uart, "[el0/shell] Storage verification FAILED!\n");
+    if run_m6_storage_and_ui(uart, vfs).is_err() {
+        libdelta::print_via(uart, "[el0/shell] M6 verification FAILED!\n");
         return 1;
     }
-
-    libdelta::print_via(
-        uart,
-        "[boot] Milestone M5 (Storage & VFS) ready. Interactive shell active (type 'help').\n",
-    );
 
     interactive_loop(uart, vfs);
     0
 }
 
-fn run_m5_storage_checks(uart: usize, vfs: usize) -> Result<(), isize> {
+fn run_m6_storage_and_ui(uart: usize, vfs: usize) -> Result<(), isize> {
     let mut buf = [0u8; 2048];
 
-    // 1. List root directory (FAT32 + /ext2 + /dev + /proc)
+    // 1. Verify separated 3-partition root (/boot, /system, /user, /dev, /proc)
     let dir_len = libdelta::vfs_readdir(vfs, "/", &mut buf)?;
-    libdelta::print_via(uart, "[el0/shell] ls /:\n");
+    libdelta::print_via(uart, "[el0/shell] ls / (boot/system/user):\n");
     if let Ok(listing) = core::str::from_utf8(&buf[..dir_len]) {
         libdelta::print_via(uart, listing);
     }
 
-    // 2. Read file from Partition 2 (ext2)
-    if let Ok(ext_len) = libdelta::vfs_read_file(vfs, "/ext2/welcome.txt", &mut buf)
-        && let Ok(text) = core::str::from_utf8(&buf[..ext_len])
+    // 2. Read Markdown note from /user DeltaFS partition
+    if let Ok(n) = libdelta::vfs_read_file(vfs, "/user/notes/welcome.md", &mut buf)
+        && let Ok(text) = core::str::from_utf8(&buf[..n])
+        && let Some(first_line) = text.lines().next()
     {
-        libdelta::print_via(uart, "[el0/shell] cat /ext2/welcome.txt: ");
-        libdelta::print_via(uart, text);
-        if !text.ends_with('\n') {
-            libdelta::print_via(uart, "\n");
-        }
+        libdelta::print_via(uart, "[el0/shell] cat /user/notes/welcome.md: ");
+        libdelta::print_via(uart, first_line);
+        libdelta::print_via(uart, "\n");
     }
 
-    // 3. Write & read back a test file on Partition 1 (FAT32)
-    let payload = b"Hollow Star OS+ FAT32 write/read verified!\n";
-    let written = libdelta::vfs_write_file(vfs, "/M5_TEST.TXT", payload)?;
+    // 3. Write & read back test file via DeltaFS write-ahead journal on /user
+    let payload = b"DeltaFS WAL journal write/read verified!\n";
+    let written = libdelta::vfs_write_file(vfs, "/user/M6_TEST.TXT", payload)?;
     if written != payload.len() {
         return Err(-5);
     }
-    let read_back = libdelta::vfs_read_file(vfs, "/M5_TEST.TXT", &mut buf)?;
+    let read_back = libdelta::vfs_read_file(vfs, "/user/M6_TEST.TXT", &mut buf)?;
     if &buf[..read_back] != payload {
         return Err(-5);
     }
     libdelta::print_via(
         uart,
-        "[el0/shell] FAT32 write & read-back (/M5_TEST.TXT) OK\n",
+        "[el0/shell] DeltaFS WAL write & read-back (/user/M6_TEST.TXT) OK\n",
     );
 
-    // 4. Launch .hsapp bundle executable from FAT32 (`/Hello.hsapp/exec`)
-    let app_pid = libdelta::spawn_from_vfs("hello", "/Hello.hsapp/exec")?;
-    let exit_code = libdelta::wait_pid(app_pid)?;
-    if exit_code != 0 {
+    // 4. Launch sample .hsapp bundle from /system
+    let hello_pid = libdelta::spawn_from_vfs("hello", "/system/apps/Hello.hsapp/exec")?;
+    if libdelta::wait_pid(hello_pid)? != 0 {
         return Err(-5);
     }
+
+    // 5. Launch HollowStar.hsapp Desktop / 1st Setup Compositor (renders FB + RT Audio chime)
+    let gui_pid = libdelta::spawn_from_vfs("hollowstar", "/system/apps/HollowStar.hsapp/exec")?;
+    let _ = libdelta::wait_pid(gui_pid);
+    libdelta::print_via(
+        uart,
+        "[el0/shell] Returned from HollowStar.hsapp to interactive shell (type 'gui' or 'help').\n",
+    );
 
     Ok(())
 }
@@ -128,8 +129,27 @@ fn execute_command(uart: usize, vfs: usize, cmd: &str) -> bool {
         "help" => {
             libdelta::print_via(
                 uart,
-                "Commands: help, ls [path], cat <path>, write <path> <text>, run <elf>, uname, exit\n",
+                "Commands: help, gui, df, ls [path], cat <path>, write <path> <text>, mkdir <path>, rm <path>, run <elf>, uname, exit\n",
             );
+        }
+        "gui" => {
+            if let Ok(pid) =
+                libdelta::spawn_from_vfs("hollowstar", "/system/apps/HollowStar.hsapp/exec")
+            {
+                let _ = libdelta::wait_pid(pid);
+            }
+        }
+        "df" => {
+            let mut stats: [VfsPartitionStat; 4] = [unsafe { core::mem::zeroed() }; 4];
+            let n = libdelta::vfs_statfs(vfs, &mut stats).unwrap_or(0);
+            for st in &stats[..n] {
+                let m = core::str::from_utf8(&st.mount[..st.mount_len as usize]).unwrap_or("?");
+                let f = core::str::from_utf8(&st.fs_type[..st.fs_len as usize]).unwrap_or("?");
+                libdelta::print_via(uart, m);
+                libdelta::print_via(uart, " -> ");
+                libdelta::print_via(uart, f);
+                libdelta::print_via(uart, "\n");
+            }
         }
         "uname" => {
             if let Ok(n) = libdelta::vfs_read_file(vfs, "/proc/version", &mut buf)
@@ -170,6 +190,14 @@ fn execute_command(uart: usize, vfs: usize, cmd: &str) -> bool {
                 libdelta::print_via(uart, "usage: write <path> <text>\n");
             }
         }
+        "mkdir" => match libdelta::vfs_mkdir(vfs, arg) {
+            Ok(()) => libdelta::print_via(uart, "mkdir: OK\n"),
+            Err(_) => libdelta::print_via(uart, "mkdir: failed\n"),
+        },
+        "rm" => match libdelta::vfs_remove(vfs, arg) {
+            Ok(()) => libdelta::print_via(uart, "rm: OK\n"),
+            Err(_) => libdelta::print_via(uart, "rm: failed\n"),
+        },
         "run" => match libdelta::spawn_from_vfs("app", arg) {
             Ok(pid) => {
                 let _ = libdelta::wait_pid(pid);

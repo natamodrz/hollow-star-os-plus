@@ -18,7 +18,7 @@ const PF_X: u32 = 1 << 0;
 const PF_W: u32 = 1 << 1;
 
 const USER_STACK_BASE: usize = 0x0000_7FFF_F000_0000;
-const USER_STACK_PAGES: usize = 4; // 16 KiB EL0 user stack
+const USER_STACK_PAGES: usize = 16; // 64 KiB EL0 user stack
 
 /// Errors returned while validating or loading an ELF64 executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

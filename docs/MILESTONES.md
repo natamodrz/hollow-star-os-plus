@@ -15,8 +15,8 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 | **M3** | Delta Scheduler & SMP | Ukończony | Przełączanie kontekstu AArch64, wielowątkowość na 4 rdzeniach Cortex-A53, priorytety `1..=120` + RT |
 | **M4** | EL0 & IPC | Ukończony | Higher-half `TTBR1`, izolowane `TTBR0` ELF64, ABI `svc #0`, porty IPC + PI, `init` + `drv-uart` |
 | **M5** | Storage & VFS | Ukończony | Serwer SD/eMMC (`drv-sd`), IRQ forwarding, `Shm`, VFS (`FAT32`/`ext2`), `/BIN/shell.elf` i `.hsapp` |
-| **M6** | Multimedia & UI | Następny etap | Kompozytor Framebuffer/HDMI (`drv-fb`), audio RT (`drv-audio`), `1st Setup`, `EN/PL`, aplikacje |
-| **1.0.0** | Production Release & DeltaFS | Planowany | Poradnik flashowania karty SD, auto-rozszerzanie partycji 2 do końca SD, własny journaling FS (DeltaFS), merge `testing -> main` |
+| **M6** | Multimedia, DeltaFS & UI | Ukończony | **DeltaFS** + 3 partycje (`boot`/`system`/`user`), `drv-fb` + `drv-audio` RT (`110`), `board-raspi02w`, `HollowStar.hsapp` |
+| **1.0.0** | Production Release & SD Install | Następny etap | Poradnik flashowania karty SD, opcjonalny CYW43 Wi-Fi/BT/FTP, scalenie `testing -> main`, wydania GitHub Releases |
 
 ---
 
@@ -76,19 +76,24 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 
 ---
 
-### M6 — Multimedia & UI *(Następny etap — parytet UX z `FEATURES_AND_UX.md`)*
+### M6 — Multimedia, DeltaFS & UI *(Ukończony — `v0.6.0`)*
 - **Zakres:**
-  - Sterownik graficzny `drivers/drv-fb` (Mailbox Property Interface + Framebuffer HDMI/DSI/SPI) oraz kompozytor okien o ostrej retro-estetyce (brak zaokrągleń, pasek statusu, czcionka monospace).
-  - Sterownik audio `drivers/drv-audio` (PWM/jack 3.5 mm / HDMI / BT na obsługiwanych wariantach) działający na priorytetach **Real-Time (`100..=120`)** planisty Delta.
-  - Obsługa klawiatury/wejścia oraz obsługa płytek z `board-raspi02w` (adaptacja opcji bezprzewodowych: ukrywanie Wi-Fi/BT/FTP na wariantach bez modułu radiowego).
-  - Pełna lokalizacja **`English` (domyślny) + `Polski`**, kreator **`1st Setup`** (język → Wi-Fi jeśli dostępne → czas → ekran powitalny z logo Hollow Star), uniwersalna pomoc pod **`F1`**, obsługa paczek aplikacji **`.hsapp`** (`Assets/`, `exec` ELF, `icon.png`) w launcherze oraz aplikacje z `FEATURES_AND_UX.md` (`Sys Info`, `Markdown Notes`, `File Explorer`, `MP3/Media Player`, `Calculator`, gry).
-- **Kryterium akceptacji:** pełny start graficzny z kreatorem `1st Setup` i testem odtwarzania audio bez przycięć pod obciążeniem UI w QEMU oraz na fizycznym Raspberry Pi 3B / Zero 2 W.
+  - **System plików DeltaFS (`fs/src/deltafs.rs`) + separacja 3 partycji (`tools/mk_sdcard.py`):**
+    - Partycja 1 (`0x0C` FAT32) → `/boot` (pliki startowe RPi); Partycja 2 (`0xDF` DeltaFS) → `/system` (`/system/bin/shell.elf`, `/system/apps/*.hsapp`); Partycja 3 (`0xDF` DeltaFS) → `/user` (konfiguracja `os.cfg`, notatki `.md`, media, dane użytkownika).
+    - DeltaFS v1 z blokami `4 KiB`, sumą CRC32, ekstensjami, atrybutami inspirowanymi BeOS BFS (`KIND_HSAPP`), dziennikiem Write-Ahead Log (WAL z automatycznym odtwarzaniem po awarii przy montowaniu) oraz dynamicznym rozszerzaniem `/user` do końca karty SD (`expand_to_blocks` + aktualizacja MBR).
+  - **Wyświetlacz i dźwięk czasu rzeczywistego (`drivers/drv-fb`, `drivers/drv-audio`):**
+    - `drv-fb` (`Priority::DISPLAY = 15`) inicjuje framebuffer `640x480@32bpp` przez VideoCore Mailbox, mapuje VRAM jako `NormalNc`, odczytuje temperaturę SoC i prezentuje klatki z `Shm` z regulacją jasności.
+    - `drv-audio` działa na priorytecie **Real-Time (`110`)**, mieszając dźwięk i obsługując routing Jack 3.5 mm / HDMI oraz głośność `0–100%`.
+  - **HAL dla Zero 2 W i adaptacja funkcji (`hal/board-raspi02w`):**
+    - Dodano crate `board-raspi02w` współdzielący prymitywy BCM2837/RP3A0 z `board-raspi3b` oraz syscall `GetSysCaps`, dzięki czemu UI automatycznie ukrywa kontrolki Wi-Fi/BT/FTP, gdy moduł radiowy/sterownik jest niedostępny.
+  - **Desktop i aplikacje (`apps/hollow-star` -> `HollowStar.hsapp/exec`):**
+    - Kreator `1st Setup` (`EN`/`PL` → automatyczne pominięcie Wi-Fi przy braku sterownika → zegar → ekran powitalny z 5-ramienną gwiazdą Hollow Star i zapisem w `/user/config/os.cfg`), uniwersalna pomoc `F1`, `Sys Info` (temperatura, RAM, 3 partycje + rozszerzanie `/user`), `Markdown Notes` (`Ctrl+S` + `Tab` podgląd), `File Explorer`, `Media Player` (Delta RT Audio), `Calculator` (`^`, `sqrt`, `F2` ułamki), klasyczne gry (`Brick Breaker`, `Tetris`, `Racing`) i `Settings`.
+- **Kryterium akceptacji:** zaliczone `./delta.sh ci` (`hal-core` 6 testów + `vfs-server` 2 testy z testem WAL replay i rozszerzania `/user` + `board-raspi02w` clippy), start `HollowStar.hsapp` rendering `640x480` VRAM w QEMU `raspi3b`, ukończenie `1st Setup`, zapis `/user/config/os.cfg` w DeltaFS oraz powrót do interaktywnej powłoki.
 
 ---
 
-### v1.0.0 — Wydanie produkcyjne, instalator SD i własny journaling FS *(Planowany)*
+### v1.0.0 — Wydanie produkcyjne i instalator SD *(Następny etap)*
 - **Zakres:**
   - **Poradnik instalacji na kartę SD:** pełna instrukcja przygotowania karty microSD dla Raspberry Pi 3B oraz Raspberry Pi Zero 2 W (z obrazów CI w GitHub Releases).
-  - **Układ partycji na karcie SD:** **Partycja 1 (`FAT32`, boot)** pozostaje obowiązkowa ze względu na sprzętowy bootloader ROM Broadcoma (`bootcode.bin`, `start.elf`, `config.txt`, `kernel8.img`). **Partycja 2 (system / dane użytkownika / aplikacje `.hsapp`)** jest automatycznie rozszerzana do końca fizycznej karty pamięci przy pierwszym starcie (na podstawie odczytanej geometrii karty z `drv-sd`).
-  - **System plików z księgowaniem (journaling):** zaprojektowanie i wdrożenie lekkiego, własnego systemu plików **DeltaFS** (inspirowanego **BeOS BFS** — 64-bitowe B+ drzewa, atrybuty/metadane dla `.hsapp` oraz dziennik transakcji write-ahead zabezpieczający dane przed nagłym zanikiem zasilania RPi) lub ewentualnie wsparcia dla `ext4` z journalingiem.
+  - **Automatyczne rozszerzanie partycji `/user` przy pierwszym uruchomieniu** oraz przygotowanie finalnych obrazów `.img` (Boot FAT32 + System DeltaFS + User DeltaFS) dla obu płytek (`raspi3b` i `raspi02w`).
   - **Promocja gałęzi i publikacja:** scalenie `testing -> main`, tag `v1.0.0` oraz publikacja gotowych obrazów dla `raspi3b` i `raspi02w` poprzez GitHub Releases.

@@ -4,18 +4,22 @@ members = [
     "kernel",
     "hal/hal-core",
     "hal/board-raspi3b",
+    "hal/board-raspi02w",
     "userland/delta-abi",
     "userland/libdelta",
     "userland/init",
     "userland/shell",
     "drivers/drv-uart",
     "drivers/drv-sd",
+    "drivers/drv-fb",
+    "drivers/drv-audio",
     "fs",
     "apps/hello",
+    "apps/hollow-star",
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 

@@ -10,9 +10,10 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 
 use delta_abi::{
-    IpcMessage, MSG_UART_WRITE, MSG_VFS_READ_FILE, MSG_VFS_READDIR, MSG_VFS_STAT,
-    MSG_VFS_WRITE_FILE, SVC_UART, SVC_VFS, SdMmioInfo, SyscallId, UartMmioInfo, VfsPacket,
-    pack_msg, unpack_msg,
+    AudioMmioInfo, DmaPageInfo, FbMmioInfo, IpcMessage, MSG_UART_WRITE, MSG_VFS_EXPAND_USER,
+    MSG_VFS_MKDIR, MSG_VFS_READ_FILE, MSG_VFS_READDIR, MSG_VFS_REMOVE, MSG_VFS_STAT,
+    MSG_VFS_STATFS, MSG_VFS_WRITE_FILE, SVC_UART, SVC_VFS, SdMmioInfo, SysCaps, SyscallId,
+    UartMmioInfo, VfsPacket, VfsPartitionStat, pack_msg, unpack_msg,
 };
 
 /// Raw AArch64 `svc #0` with up to 4 arguments.
@@ -77,6 +78,19 @@ pub fn spawn_elf(name: &str, elf_bytes: &[u8]) -> Result<usize, isize> {
 /// Waits for child/target process `pid` to exit and returns its exit code.
 pub fn wait_pid(pid: usize) -> Result<usize, isize> {
     to_result(syscall4(SyscallId::WaitPid, pid, 0, 0, 0))
+}
+
+/// Retrieves live RAM, uptime, board name, and wireless capabilities (`GetSysCaps`).
+pub fn sys_caps() -> Result<SysCaps, isize> {
+    let mut caps = SysCaps::empty();
+    to_result(syscall4(
+        SyscallId::GetSysCaps,
+        core::ptr::from_mut(&mut caps) as usize,
+        0,
+        0,
+        0,
+    ))?;
+    Ok(caps)
 }
 
 /// Creates an IPC port with `capacity` queued messages and returns its capability handle.
@@ -214,6 +228,56 @@ pub fn irq_bind(port_cap: usize, irq_num: u32) -> Result<(), isize> {
 /// Re-enables a hardware peripheral IRQ line after handling the interrupt in EL0.
 pub fn irq_ack(irq_num: u32) -> Result<(), isize> {
     to_result(syscall4(SyscallId::IrqAck, irq_num as usize, 0, 0, 0)).map(|_| ())
+}
+
+/// Retrieves isolated VideoCore Mailbox MMIO info (`drv-fb` capability).
+pub fn fb_mmio_info() -> Result<FbMmioInfo, isize> {
+    let mut info = FbMmioInfo {
+        mbox_virt_base: 0,
+        vc_bus_offset: 0,
+    };
+    to_result(syscall4(
+        SyscallId::GetFbMmioInfo,
+        core::ptr::from_mut(&mut info) as usize,
+        0,
+        0,
+        0,
+    ))?;
+    Ok(info)
+}
+
+/// Maps physical VideoCore framebuffer aperture `[phys_addr, phys_addr + size_bytes)` in `drv-fb`.
+pub fn map_fb_phys(phys_addr: usize, size_bytes: usize) -> Result<usize, isize> {
+    to_result(syscall4(SyscallId::MapFbPhys, phys_addr, size_bytes, 0, 0))
+}
+
+/// Allocates a 4 KiB Non-Cacheable DMA page for EL0 hardware drivers.
+pub fn alloc_dma_page() -> Result<DmaPageInfo, isize> {
+    let mut info = DmaPageInfo {
+        phys_addr: 0,
+        user_va: 0,
+    };
+    to_result(syscall4(
+        SyscallId::AllocDmaPage,
+        core::ptr::from_mut(&mut info) as usize,
+        0,
+        0,
+        0,
+    ))?;
+    Ok(info)
+}
+
+/// Retrieves isolated PWM/audio MMIO info (`drv-audio` capability).
+pub fn audio_mmio_info() -> Result<AudioMmioInfo, isize> {
+    let mut info = AudioMmioInfo { virt_base: 0 };
+    to_result(syscall4(
+        SyscallId::GetAudioMmioInfo,
+        core::ptr::from_mut(&mut info) as usize,
+        0,
+        0,
+        0,
+    ))?;
+    Ok(info)
 }
 
 /// Creates a shared memory buffer of `size_bytes` and returns `(shm_id, mapped_va)`.
@@ -381,11 +445,88 @@ pub fn vfs_stat(vfs_cap: usize, path: &str) -> Result<(usize, bool), isize> {
     Ok((reply_pkt.size as usize, reply_pkt.is_dir != 0))
 }
 
+/// Creates a directory at `path` via `svc.vfs`.
+pub fn vfs_mkdir(vfs_cap: usize, path: &str) -> Result<(), isize> {
+    let pkt = VfsPacket::for_path(path.as_bytes());
+    let req = pack_msg(MSG_VFS_MKDIR, &pkt);
+    let mut reply_msg = IpcMessage::new(0);
+    port_call(vfs_cap, &req, &mut reply_msg)?;
+    let reply_pkt: VfsPacket = unpack_msg(&reply_msg).ok_or(-5isize)?;
+    if reply_pkt.status < 0 {
+        Err(reply_pkt.status as isize)
+    } else {
+        Ok(())
+    }
+}
+
+/// Removes a file at `path` via `svc.vfs`.
+pub fn vfs_remove(vfs_cap: usize, path: &str) -> Result<(), isize> {
+    let pkt = VfsPacket::for_path(path.as_bytes());
+    let req = pack_msg(MSG_VFS_REMOVE, &pkt);
+    let mut reply_msg = IpcMessage::new(0);
+    port_call(vfs_cap, &req, &mut reply_msg)?;
+    let reply_pkt: VfsPacket = unpack_msg(&reply_msg).ok_or(-5isize)?;
+    if reply_pkt.status < 0 {
+        Err(reply_pkt.status as isize)
+    } else {
+        Ok(())
+    }
+}
+
+/// Queries mounted partition capacities and filesystem types (`VfsPartitionStat` slice).
+pub fn vfs_statfs(vfs_cap: usize, out: &mut [VfsPartitionStat]) -> Result<usize, isize> {
+    if out.is_empty() {
+        return Ok(0);
+    }
+    let bytes_needed = core::mem::size_of_val(out).max(4096);
+    let (shm_id, va) = shm_create(bytes_needed)?;
+    if let Err(e) = shm_allow_port(shm_id, vfs_cap) {
+        let _ = shm_unmap(shm_id);
+        return Err(e);
+    }
+    let mut pkt = VfsPacket::for_path(b"/");
+    pkt.shm_id = shm_id;
+    pkt.size = out.len() as u32;
+    let req = pack_msg(MSG_VFS_STATFS, &pkt);
+    let mut reply_msg = IpcMessage::new(0);
+    let res = port_call(vfs_cap, &req, &mut reply_msg);
+    if let Err(e) = res {
+        let _ = shm_unmap(shm_id);
+        return Err(e);
+    }
+    let reply_pkt: VfsPacket = unpack_msg(&reply_msg).ok_or(-5isize)?;
+    if reply_pkt.status < 0 {
+        let _ = shm_unmap(shm_id);
+        return Err(reply_pkt.status as isize);
+    }
+    let count = (reply_pkt.size as usize).min(out.len());
+    // SAFETY: `va` holds `count` `VfsPartitionStat` records written by `svc.vfs`.
+    let src = unsafe { core::slice::from_raw_parts(va as *const VfsPartitionStat, count) };
+    out[..count].copy_from_slice(src);
+    let _ = shm_unmap(shm_id);
+    Ok(count)
+}
+
+/// Expands the `/user` DeltaFS partition bitmap to `target_sectors` sectors.
+pub fn vfs_expand_user(vfs_cap: usize, target_sectors: u64) -> Result<u64, isize> {
+    let mut pkt = VfsPacket::for_path(b"/user");
+    pkt.offset = target_sectors;
+    let req = pack_msg(MSG_VFS_EXPAND_USER, &pkt);
+    let mut reply_msg = IpcMessage::new(0);
+    port_call(vfs_cap, &req, &mut reply_msg)?;
+    let reply_pkt: VfsPacket = unpack_msg(&reply_msg).ok_or(-5isize)?;
+    if reply_pkt.status < 0 {
+        Err(reply_pkt.status as isize)
+    } else {
+        Ok(reply_pkt.offset)
+    }
+}
+
 /// Launches an ELF executable or `<App>.hsapp/exec` bundle from VFS (`svc.vfs`).
 pub fn spawn_from_vfs(name: &str, path: &str) -> Result<usize, isize> {
     let vfs_cap = wait_for_service(SVC_VFS);
     let (size, is_dir) = vfs_stat(vfs_cap, path)?;
-    if is_dir || size == 0 || size > 256 * 1024 {
+    if is_dir || size == 0 || size > 512 * 1024 {
         return Err(delta_abi::errno::EINVAL);
     }
     let (shm_id, va) = shm_create(size)?;

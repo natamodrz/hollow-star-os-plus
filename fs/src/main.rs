@@ -3,11 +3,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 //! Userspace (`EL0`) VFS server (`vfsd`, `svc.vfs`) connecting to `drv-sd` (`svc.sd`).
+//!
+//! Mounts `/boot` (FAT32), `/system` (DeltaFS), `/user` (DeltaFS), `/dev`, and `/proc`.
 
 use libdelta::delta_abi::{
-    IpcMessage, MSG_SD_READ, MSG_SD_WRITE, MSG_VFS_ACK, MSG_VFS_READ_FILE, MSG_VFS_READDIR,
-    MSG_VFS_STAT, MSG_VFS_WRITE_FILE, SVC_SD, SVC_VFS, SdIoPacket, VfsPacket, errno, pack_msg,
-    unpack_msg,
+    IpcMessage, MSG_SD_INFO, MSG_SD_READ, MSG_SD_WRITE, MSG_VFS_ACK, MSG_VFS_EXPAND_USER,
+    MSG_VFS_MKDIR, MSG_VFS_READ_FILE, MSG_VFS_READDIR, MSG_VFS_REMOVE, MSG_VFS_STAT,
+    MSG_VFS_STATFS, MSG_VFS_WRITE_FILE, SVC_SD, SVC_VFS, SdIoPacket, VfsPacket, VfsPartitionStat,
+    errno, pack_msg, unpack_msg,
 };
 use vfs_core::VfsRouter;
 use vfs_core::block::{BlockDevice, FsError, SECTOR_SIZE};
@@ -18,6 +21,7 @@ struct IpcBlockClient {
     sd_cap: usize,
     shm_id: u64,
     shm_va: usize,
+    total_sectors: u64,
 }
 
 impl IpcBlockClient {
@@ -27,10 +31,29 @@ impl IpcBlockClient {
             let _ = libdelta::shm_unmap(shm_id);
             return Err(e);
         }
+
+        // Probe disk capacity if exposed by drv-sd.
+        let req = pack_msg(
+            MSG_SD_INFO,
+            &SdIoPacket {
+                lba: 0,
+                shm_id: 0,
+                count: 0,
+                status: 0,
+            },
+        );
+        let mut reply = IpcMessage::new(0);
+        let total_sectors = if libdelta::port_call(sd_cap, &req, &mut reply).is_ok() {
+            unpack_msg::<SdIoPacket>(&reply).map(|p| p.lba).unwrap_or(0)
+        } else {
+            0
+        };
+
         Ok(Self {
             sd_cap,
             shm_id,
             shm_va,
+            total_sectors,
         })
     }
 }
@@ -114,25 +137,21 @@ fn delta_main() -> usize {
         return 1;
     };
 
-    let Ok(vfs) = VfsRouter::mount(&mut blk) else {
-        libdelta::print("[el0/vfsd] Failed to mount MBR/FAT32 SD card\n");
+    let Ok(mut vfs) = VfsRouter::mount(&mut blk) else {
+        libdelta::print("[el0/vfsd] Failed to mount MBR partitions (/boot, /system, /user)\n");
         return 2;
     };
 
-    let Ok(port) = libdelta::port_create(16) else {
+    let Ok(port) = libdelta::port_create(24) else {
         return 3;
     };
     if libdelta::service_register(SVC_VFS, port).is_err() {
         return 4;
     }
 
-    if vfs.has_ext2() {
-        libdelta::print(
-            "[el0/vfsd] VFS online (EL0, svc.vfs: FAT32 / + ext2 /ext2 + /dev + /proc)\n",
-        );
-    } else {
-        libdelta::print("[el0/vfsd] VFS online (EL0, svc.vfs: FAT32 / + /dev + /proc)\n");
-    }
+    libdelta::print(
+        "[el0/vfsd] VFS online (EL0, svc.vfs: FAT32 /boot + DeltaFS /system + DeltaFS /user + /dev + /proc)\n",
+    );
 
     let mut msg = IpcMessage::new(0);
     loop {
@@ -159,7 +178,36 @@ fn delta_main() -> usize {
             }
             MSG_VFS_READDIR => handle_shm_read(&vfs, &mut blk, &mut pkt, true),
             MSG_VFS_READ_FILE => handle_shm_read(&vfs, &mut blk, &mut pkt, false),
-            MSG_VFS_WRITE_FILE => handle_shm_write(&vfs, &mut blk, &mut pkt),
+            MSG_VFS_WRITE_FILE => handle_shm_write(&mut vfs, &mut blk, &mut pkt),
+            MSG_VFS_MKDIR => {
+                let path = core::str::from_utf8(pkt.path_bytes()).unwrap_or("");
+                pkt.status = match vfs.mkdir(&mut blk, path) {
+                    Ok(()) => 0,
+                    Err(e) => e.to_errno(),
+                };
+            }
+            MSG_VFS_REMOVE => {
+                let path = core::str::from_utf8(pkt.path_bytes()).unwrap_or("");
+                pkt.status = match vfs.remove(&mut blk, path) {
+                    Ok(()) => 0,
+                    Err(e) => e.to_errno(),
+                };
+            }
+            MSG_VFS_STATFS => handle_statfs(&vfs, &mut blk, &mut pkt),
+            MSG_VFS_EXPAND_USER => {
+                let target_sectors = if pkt.offset > 0 {
+                    pkt.offset
+                } else {
+                    blk.total_sectors
+                };
+                match vfs.expand_user_to_disk(&mut blk, target_sectors) {
+                    Ok(bytes) => {
+                        pkt.offset = bytes;
+                        pkt.status = 0;
+                    }
+                    Err(e) => pkt.status = e.to_errno(),
+                }
+            }
             _ => pkt.status = errno::ENOSYS as i32,
         }
 
@@ -197,7 +245,7 @@ fn handle_shm_read(vfs: &VfsRouter, blk: &mut IpcBlockClient, pkt: &mut VfsPacke
     let _ = libdelta::shm_unmap(pkt.shm_id);
 }
 
-fn handle_shm_write(vfs: &VfsRouter, blk: &mut IpcBlockClient, pkt: &mut VfsPacket) {
+fn handle_shm_write(vfs: &mut VfsRouter, blk: &mut IpcBlockClient, pkt: &mut VfsPacket) {
     let Ok((va, mapped_size)) = libdelta::shm_map(pkt.shm_id) else {
         pkt.status = errno::EPERM as i32;
         return;
@@ -217,5 +265,19 @@ fn handle_shm_write(vfs: &VfsRouter, blk: &mut IpcBlockClient, pkt: &mut VfsPack
         }
         Err(e) => pkt.status = e.to_errno(),
     }
+    let _ = libdelta::shm_unmap(pkt.shm_id);
+}
+
+fn handle_statfs(vfs: &VfsRouter, blk: &mut IpcBlockClient, pkt: &mut VfsPacket) {
+    let Ok((va, mapped_size)) = libdelta::shm_map(pkt.shm_id) else {
+        pkt.status = errno::EPERM as i32;
+        return;
+    };
+    let cap = (mapped_size / core::mem::size_of::<VfsPartitionStat>()).min(pkt.size as usize);
+    // SAFETY: `va` maps `mapped_size` writable bytes in our `TTBR0`.
+    let out = unsafe { core::slice::from_raw_parts_mut(va as *mut VfsPartitionStat, cap) };
+    let count = vfs.statfs(blk, out);
+    pkt.size = count as u32;
+    pkt.status = 0;
     let _ = libdelta::shm_unmap(pkt.shm_id);
 }

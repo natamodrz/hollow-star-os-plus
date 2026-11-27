@@ -18,6 +18,9 @@ const BLKSIZECNT: usize = 0x04;
 const ARG1: usize = 0x08;
 const CMDTM: usize = 0x0C;
 const RESP0: usize = 0x10;
+const RESP1: usize = 0x14;
+const RESP2: usize = 0x18;
+const RESP3: usize = 0x1C;
 const DATA: usize = 0x20;
 const STATUS: usize = 0x24;
 const CONTROL0: usize = 0x28;
@@ -60,6 +63,7 @@ struct EmmcDriver {
     irq_port: usize,
     is_sdhc: bool,
     rca: u32,
+    total_sectors: u64,
 }
 
 impl EmmcDriver {
@@ -70,6 +74,7 @@ impl EmmcDriver {
             irq_port,
             is_sdhc: false,
             rca: 0,
+            total_sectors: 0,
         }
     }
 
@@ -222,6 +227,27 @@ impl EmmcDriver {
             self.send_cmd(make_cmd(3, CMD_RSPNS_48 | CMD_CRCCHK_EN | CMD_IXCHK_EN), 0)?;
         self.rca = rca_resp & 0xFFFF_0000;
 
+        // CMD9: SEND_CSD (136-bit response) to read physical card capacity
+        if self
+            .send_cmd(make_cmd(9, CMD_RSPNS_136 | CMD_CRCCHK_EN), self.rca)
+            .is_ok()
+        {
+            let r1 = u64::from(self.read(RESP1));
+            let r2 = u64::from(self.read(RESP2));
+            let r3 = u64::from(self.read(RESP3));
+            let csd_struct = (r3 >> 22) & 0x3;
+            self.total_sectors = if csd_struct == 1 {
+                let c_size = ((r2 & 0x3F) << 16) | (r1 >> 16);
+                (c_size + 1) * 1024
+            } else {
+                let read_bl_len = (r2 >> 8) & 0xF;
+                let c_size = ((r2 & 0x3) << 10) | ((r1 >> 22) & 0x3FF);
+                let c_size_mult = (r1 >> 7) & 0x7;
+                let blocknr = (c_size + 1) << (c_size_mult + 2);
+                (blocknr << read_bl_len) / 512
+            };
+        }
+
         // CMD7: SELECT_CARD
         self.send_cmd(
             make_cmd(7, CMD_RSPNS_48_BUSY | CMD_CRCCHK_EN | CMD_IXCHK_EN),
@@ -342,6 +368,7 @@ fn delta_main() -> usize {
 
         pkt.status = match msg.tag {
             MSG_SD_INFO => {
+                pkt.lba = sd.total_sectors;
                 pkt.count = 512;
                 0
             }

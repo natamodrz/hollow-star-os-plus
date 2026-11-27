@@ -35,6 +35,12 @@ pub const PL011_UART0_BASE: usize = PERIPHERAL_BASE + 0x0020_1000;
 pub const AUX_BASE: usize = PERIPHERAL_BASE + 0x0021_5000;
 /// BCM2837 Arasan EMMC (SDHCI) controller base address.
 pub const EMMC_BASE: usize = PERIPHERAL_BASE + 0x0030_0000;
+/// BCM2837 VideoCore Mailbox 0/1 register base address (`0x3F00_B880`).
+pub const MAILBOX_BASE: usize = PERIPHERAL_BASE + 0x0000_B880;
+/// BCM2837 PWM0 audio controller base address (`0x3F20_C000`).
+pub const PWM_BASE: usize = PERIPHERAL_BASE + 0x0020_C000;
+/// BCM2837 VideoCore uncached L2-bypass bus alias offset (`0xC000_0000`).
+pub const VC_BUS_ALIAS_OFFSET: usize = 0xC000_0000;
 /// BCM2837 EMMC GPU interrupt number (`IRQ2` bit `30`).
 pub const EMMC_IRQ: u32 = 62;
 
@@ -43,6 +49,9 @@ const SPIN_TABLE_BASE: usize = 0xD8;
 
 /// Conservative ARM-accessible physical RAM limit on 1 GiB RPi 3B (948 MiB before VideoCore split).
 pub const DEFAULT_ARM_RAM_SIZE: usize = 0x3B40_0000;
+/// Physical VideoCore RAM aperture (`0x3B40_0000 .. 0x3F00_0000`) on 1 GiB RPi 3B.
+pub const VCRAM_PHYS_BASE: usize = DEFAULT_ARM_RAM_SIZE;
+pub const VCRAM_PHYS_SIZE: usize = PERIPHERAL_BASE - DEFAULT_ARM_RAM_SIZE;
 const FIRMWARE_RESERVED_END: usize = 0x0008_0000;
 
 static RASPI3B_MEMORY_REGIONS: [MemoryRegion; 4] = [
@@ -125,6 +134,8 @@ impl Board for Raspi3bBoard {
             cpu_count: 4,
             ram_base: 0x0000_0000,
             ram_size_bytes: DEFAULT_ARM_RAM_SIZE,
+            has_wifi: cfg!(feature = "wireless"),
+            has_bluetooth: cfg!(feature = "wireless"),
         }
     }
 
@@ -162,35 +173,59 @@ impl Board for Raspi3bBoard {
         ))
     }
 
+    fn mailbox_mmio_region(&self) -> Option<(MemoryRegion, usize)> {
+        Some((
+            MemoryRegion::new(MAILBOX_BASE, PAGE_SIZE, MemoryKind::DeviceMmio),
+            VC_BUS_ALIAS_OFFSET,
+        ))
+    }
+
+    fn framebuffer_phys_window(&self) -> Option<(usize, usize)> {
+        Some((VCRAM_PHYS_BASE, VCRAM_PHYS_SIZE))
+    }
+
+    fn audio_mmio_region(&self) -> Option<MemoryRegion> {
+        Some(MemoryRegion::new(
+            PWM_BASE,
+            PAGE_SIZE,
+            MemoryKind::DeviceMmio,
+        ))
+    }
+
     fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError> {
-        if core_id == 0 || core_id >= 4 {
-            return Err(SmpError::InvalidCore);
-        }
-
-        let mailbox_virt = 0xFFFF_0000_0000_0000usize + SPIN_TABLE_BASE + core_id * 8;
-        #[cfg(target_arch = "aarch64")]
-        // SAFETY: `mailbox_virt` maps BCM2837 AArch64 firmware spin-table slot
-        // (`0xE0`/`0xE8`/`0xF0`) in page 0 via `TTBR1_EL1`. Cleaning cache to PoC
-        // (`dc civac`) + `dsb sy` + `sev` ensures sleeping EL2 cores observe `entry_phys`.
-        unsafe {
-            core::ptr::write_volatile(mailbox_virt as *mut u64, entry_phys as u64);
-            core::arch::asm!(
-                "dc civac, {addr}",
-                "dsb sy",
-                "sev",
-                addr = in(reg) mailbox_virt,
-                options(nostack)
-            );
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        let _ = (mailbox_virt, entry_phys);
-
-        Ok(())
+        bcm2837_wake_secondary_core(core_id, entry_phys)
     }
 
     fn halt(&self) -> ! {
         halt_forever()
     }
+}
+
+/// Shared BCM2837 firmware spin-table secondary-core wakeup usable across RPi 3B & Zero 2 W.
+pub fn bcm2837_wake_secondary_core(core_id: usize, entry_phys: usize) -> Result<(), SmpError> {
+    if core_id == 0 || core_id >= 4 {
+        return Err(SmpError::InvalidCore);
+    }
+
+    let mailbox_virt = 0xFFFF_0000_0000_0000usize + SPIN_TABLE_BASE + core_id * 8;
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: `mailbox_virt` maps BCM2837 AArch64 firmware spin-table slot
+    // (`0xE0`/`0xE8`/`0xF0`) in page 0 via `TTBR1_EL1`. Cleaning cache to PoC
+    // (`dc civac`) + `dsb sy` + `sev` ensures sleeping EL2 cores observe `entry_phys`.
+    unsafe {
+        core::ptr::write_volatile(mailbox_virt as *mut u64, entry_phys as u64);
+        core::arch::asm!(
+            "dc civac, {addr}",
+            "dsb sy",
+            "sev",
+            addr = in(reg) mailbox_virt,
+            options(nostack)
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = (mailbox_virt, entry_phys);
+
+    Ok(())
 }
 
 /// Halts the calling CPU core in a low-power wait loop.

@@ -23,6 +23,7 @@ const DESC_BLOCK: u64 = 0 << 1;
 
 const ATTR_NORMAL: u64 = 0 << 2;
 const ATTR_DEVICE: u64 = 1 << 2;
+const ATTR_NORMAL_NC: u64 = 2 << 2;
 
 const AP_SHIFT: usize = 6;
 const AP_EL1_RW: u64 = 0b00 << AP_SHIFT;
@@ -80,6 +81,8 @@ pub enum UserPageAttrs {
     RwData,
     /// Read-write, non-executable `Device-nGnRnE` MMIO mapped to a driver server.
     DeviceMmio,
+    /// Read-write, non-executable Normal Non-Cacheable DMA / VideoCore framebuffer memory.
+    NormalNc,
 }
 
 impl UserPageAttrs {
@@ -89,6 +92,7 @@ impl UserPageAttrs {
             Self::RoData => ATTR_NORMAL | AP_EL0_RO | SH_INNER_SHAREABLE | AF | NG | PXN | UXN,
             Self::RwData => ATTR_NORMAL | AP_EL0_RW | SH_INNER_SHAREABLE | AF | NG | PXN | UXN,
             Self::DeviceMmio => ATTR_DEVICE | AP_EL0_RW | SH_NON_SHAREABLE | AF | NG | PXN | UXN,
+            Self::NormalNc => ATTR_NORMAL_NC | AP_EL0_RW | SH_INNER_SHAREABLE | AF | NG | PXN | UXN,
         }
     }
 }

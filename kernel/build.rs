@@ -11,7 +11,9 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.join("..");
 
-    if env::var_os("CARGO_FEATURE_BOARD_RASPI3B").is_some() {
+    if env::var_os("CARGO_FEATURE_BOARD_RASPI3B").is_some()
+        || env::var_os("CARGO_FEATURE_BOARD_RASPI02W").is_some()
+    {
         let linker_script = workspace_root
             .join("hal")
             .join("board-raspi3b")
@@ -26,8 +28,13 @@ fn main() {
         "drivers/drv-uart/Cargo.toml",
         "drivers/drv-sd/src/main.rs",
         "drivers/drv-sd/Cargo.toml",
+        "drivers/drv-fb/src/main.rs",
+        "drivers/drv-fb/Cargo.toml",
+        "drivers/drv-audio/src/main.rs",
+        "drivers/drv-audio/Cargo.toml",
         "fs/src/lib.rs",
         "fs/src/main.rs",
+        "fs/src/deltafs.rs",
         "fs/src/fat32.rs",
         "fs/src/ext2.rs",
         "fs/src/mbr.rs",
@@ -38,6 +45,13 @@ fn main() {
         "userland/shell/Cargo.toml",
         "apps/hello/src/main.rs",
         "apps/hello/Cargo.toml",
+        "apps/hollow-star/src/main.rs",
+        "apps/hollow-star/src/font.rs",
+        "apps/hollow-star/src/gfx.rs",
+        "apps/hollow-star/src/i18n.rs",
+        "apps/hollow-star/src/calc.rs",
+        "apps/hollow-star/src/games.rs",
+        "apps/hollow-star/Cargo.toml",
         "userland/libdelta/src/lib.rs",
         "userland/delta-abi/src/lib.rs",
         "userland/user.ld",
@@ -59,6 +73,10 @@ fn main() {
             "--package",
             "drv-sd",
             "--package",
+            "drv-fb",
+            "--package",
+            "drv-audio",
+            "--package",
             "vfs-server",
             "--package",
             "init",
@@ -66,6 +84,8 @@ fn main() {
             "shell",
             "--package",
             "hello-app",
+            "--package",
+            "hollow-star-app",
             "--target",
             "aarch64-unknown-none",
             "--release",
@@ -85,6 +105,14 @@ fn main() {
     println!(
         "cargo:rustc-env=DRV_SD_ELF={}",
         elf_dir.join("drv-sd").display()
+    );
+    println!(
+        "cargo:rustc-env=DRV_FB_ELF={}",
+        elf_dir.join("drv-fb").display()
+    );
+    println!(
+        "cargo:rustc-env=DRV_AUDIO_ELF={}",
+        elf_dir.join("drv-audio").display()
     );
     println!(
         "cargo:rustc-env=VFSD_ELF={}",

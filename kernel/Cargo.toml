@@ -13,9 +13,11 @@ bench = false
 [features]
 default = ["board-raspi3b"]
 board-raspi3b = ["dep:board-raspi3b"]
-mini-uart = ["board-raspi3b?/mini-uart"]
+board-raspi02w = ["dep:board-raspi02w"]
+mini-uart = ["board-raspi3b?/mini-uart", "board-raspi02w?/mini-uart"]
 
 [dependencies]
 delta-abi = { path = "../userland/delta-abi" }
 hal-core = { path = "../hal/hal-core" }
 board-raspi3b = { path = "../hal/board-raspi3b", optional = true }
+board-raspi02w = { path = "../hal/board-raspi02w", optional = true }

@@ -8,6 +8,7 @@ description = "Raspberry Pi 3B (BCM2837) board support crate for Hollow Star OS+
 [features]
 default = []
 mini-uart = []
+wireless = []
 
 [dependencies]
 hal-core = { path = "../hal-core" }

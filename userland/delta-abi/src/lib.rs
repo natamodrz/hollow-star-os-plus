@@ -8,6 +8,10 @@ pub const SVC_UART: &str = "svc.uart";
 pub const SVC_SD: &str = "svc.sd";
 /// Service name registered by the userspace VFS server (`vfsd`).
 pub const SVC_VFS: &str = "svc.vfs";
+/// Service name registered by the userspace Framebuffer display server (`drv-fb`).
+pub const SVC_FB: &str = "svc.fb";
+/// Service name registered by the userspace Real-Time audio server (`drv-audio`).
+pub const SVC_AUDIO: &str = "svc.audio";
 
 /// IPC message tag asking `drv-uart` to write payload bytes to the serial console.
 pub const MSG_UART_WRITE: u64 = 1;
@@ -30,7 +34,25 @@ pub const MSG_VFS_READ_FILE: u64 = 0x301;
 pub const MSG_VFS_WRITE_FILE: u64 = 0x302;
 pub const MSG_VFS_READDIR: u64 = 0x303;
 pub const MSG_VFS_STAT: u64 = 0x304;
+pub const MSG_VFS_MKDIR: u64 = 0x305;
+pub const MSG_VFS_REMOVE: u64 = 0x306;
+pub const MSG_VFS_STATFS: u64 = 0x307;
+pub const MSG_VFS_EXPAND_USER: u64 = 0x308;
 pub const MSG_VFS_ACK: u64 = 0x3FF;
+
+/// Display server IPC opcodes (`svc.fb`).
+pub const MSG_FB_GET_INFO: u64 = 0x401;
+pub const MSG_FB_PRESENT: u64 = 0x402;
+pub const MSG_FB_ACK: u64 = 0x4FF;
+
+/// Audio server IPC opcodes (`svc.audio`).
+pub const MSG_AUDIO_PLAY_TONE: u64 = 0x501;
+pub const MSG_AUDIO_SET_VOL: u64 = 0x502;
+pub const MSG_AUDIO_SET_ROUTE: u64 = 0x503;
+pub const MSG_AUDIO_STOP: u64 = 0x504;
+pub const MSG_AUDIO_STATUS: u64 = 0x505;
+pub const MSG_AUDIO_PLAY_PCM_SHM: u64 = 0x506;
+pub const MSG_AUDIO_ACK: u64 = 0x5FF;
 
 /// Maximum inline payload size inside [`IpcMessage`].
 pub const IPC_MAX_DATA: usize = 96;
@@ -47,6 +69,7 @@ pub enum SyscallId {
     GetPid = 2,
     SpawnElf = 3,
     WaitPid = 4,
+    GetSysCaps = 5,
     PortCreate = 10,
     PortSend = 11,
     PortRecv = 12,
@@ -58,6 +81,10 @@ pub enum SyscallId {
     GetSdMmioInfo = 31,
     IrqBind = 32,
     IrqAck = 33,
+    GetFbMmioInfo = 34,
+    MapFbPhys = 35,
+    AllocDmaPage = 36,
+    GetAudioMmioInfo = 37,
     ShmCreate = 40,
     ShmAllowPort = 41,
     ShmMap = 42,
@@ -73,6 +100,7 @@ impl SyscallId {
             2 => Some(Self::GetPid),
             3 => Some(Self::SpawnElf),
             4 => Some(Self::WaitPid),
+            5 => Some(Self::GetSysCaps),
             10 => Some(Self::PortCreate),
             11 => Some(Self::PortSend),
             12 => Some(Self::PortRecv),
@@ -84,6 +112,10 @@ impl SyscallId {
             31 => Some(Self::GetSdMmioInfo),
             32 => Some(Self::IrqBind),
             33 => Some(Self::IrqAck),
+            34 => Some(Self::GetFbMmioInfo),
+            35 => Some(Self::MapFbPhys),
+            36 => Some(Self::AllocDmaPage),
+            37 => Some(Self::GetAudioMmioInfo),
             40 => Some(Self::ShmCreate),
             41 => Some(Self::ShmAllowPort),
             42 => Some(Self::ShmMap),
@@ -191,6 +223,119 @@ pub struct SdMmioInfo {
     pub irq_num: u32,
     pub _pad: u32,
 }
+
+/// System hardware, memory, and wireless capability snapshot (`GetSysCaps`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SysCaps {
+    pub ram_total_bytes: u64,
+    pub ram_free_bytes: u64,
+    pub uptime_ms: u64,
+    pub cpu_count: u8,
+    pub has_wifi: u8,
+    pub has_bluetooth: u8,
+    pub board_name_len: u8,
+    pub board_name: [u8; 32],
+}
+
+impl SysCaps {
+    pub const fn empty() -> Self {
+        Self {
+            ram_total_bytes: 0,
+            ram_free_bytes: 0,
+            uptime_ms: 0,
+            cpu_count: 0,
+            has_wifi: 0,
+            has_bluetooth: 0,
+            board_name_len: 0,
+            board_name: [0; 32],
+        }
+    }
+
+    pub fn board_name_str(&self) -> &str {
+        let len = (self.board_name_len as usize).min(32);
+        core::str::from_utf8(&self.board_name[..len]).unwrap_or("Raspberry Pi")
+    }
+}
+
+/// Mailbox MMIO capability returned to the userspace display driver (`drv-fb`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbMmioInfo {
+    pub mbox_virt_base: usize,
+    pub vc_bus_offset: usize,
+}
+
+/// Non-cacheable DMA buffer descriptor returned by [`SyscallId::AllocDmaPage`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DmaPageInfo {
+    pub phys_addr: usize,
+    pub user_va: usize,
+}
+
+/// PWM/Audio MMIO capability returned to `drv-audio`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AudioMmioInfo {
+    pub virt_base: usize,
+}
+
+/// Display status/present payload packed into [`IpcMessage::data`] for `svc.fb`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbPacket {
+    pub shm_id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u32,
+    pub shm_bytes: u32,
+    pub soc_temp_mc: i32,
+    pub brightness: u8,
+    pub hw_active: u8,
+    pub _pad: [u8; 2],
+    pub status: i32,
+}
+
+const _: () = assert!(core::mem::size_of::<FbPacket>() <= IPC_MAX_DATA);
+
+/// Real-time audio command/status payload packed into [`IpcMessage::data`] for `svc.audio`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AudioPacket {
+    pub shm_id: u64,
+    pub frames_mixed: u64,
+    pub sample_count: u32,
+    pub freq_hz: u16,
+    pub duration_ms: u16,
+    pub volume: u8,
+    /// `0` = Auto / Wired 3.5mm Jack, `1` = HDMI, `2` = BT (when enabled).
+    pub route: u8,
+    pub playing: u8,
+    pub jack_plugged: u8,
+    pub rt_priority: u8,
+    pub _pad: [u8; 3],
+    pub status: i32,
+}
+
+const _: () = assert!(core::mem::size_of::<AudioPacket>() <= IPC_MAX_DATA);
+
+/// Mounted filesystem statistics returned inside `Shm` or IPC by `MSG_VFS_STATFS`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VfsPartitionStat {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub mount_len: u8,
+    pub fs_len: u8,
+    pub writable: u8,
+    pub expandable: u8,
+    pub mount: [u8; 16],
+    pub fs_type: [u8; 12],
+}
+
+const _: () = assert!(core::mem::size_of::<VfsPartitionStat>() <= 64);
 
 /// Block I/O request payload packed into [`IpcMessage::data`] for `svc.sd`.
 #[repr(C)]

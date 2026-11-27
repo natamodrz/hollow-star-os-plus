@@ -88,6 +88,35 @@ impl Fat32Volume {
         })
     }
 
+    /// Computes free data bytes on this FAT32 volume by scanning its FAT table.
+    pub fn free_bytes<B: BlockDevice>(&self, dev: &mut B) -> u64 {
+        let mut free_clusters = 0u64;
+        let mut sec = [0u8; SECTOR_SIZE];
+        let mut loaded_sec = u64::MAX;
+        let max_cid = self.total_clusters.saturating_add(2);
+        for cid in 2..max_cid {
+            let fat_offset = u64::from(cid) * 4;
+            let fat_sector = u64::from(self.reserved_sectors) + fat_offset / (SECTOR_SIZE as u64);
+            let ent_off = (fat_offset % (SECTOR_SIZE as u64)) as usize;
+            if fat_sector != loaded_sec {
+                if dev.read_sectors(fat_sector, &mut sec).is_err() {
+                    break;
+                }
+                loaded_sec = fat_sector;
+            }
+            let raw = u32::from_le_bytes([
+                sec[ent_off],
+                sec[ent_off + 1],
+                sec[ent_off + 2],
+                sec[ent_off + 3],
+            ]);
+            if (raw & FAT32_MASK) == 0 {
+                free_clusters += 1;
+            }
+        }
+        free_clusters * u64::from(self.sectors_per_cluster) * (SECTOR_SIZE as u64)
+    }
+
     fn cluster_to_lba(&self, cluster: u32) -> u64 {
         self.data_start_lba
             + u64::from(cluster.saturating_sub(2)) * u64::from(self.sectors_per_cluster)

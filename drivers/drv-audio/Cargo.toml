@@ -1,0 +1,14 @@
+[package]
+name = "drv-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Userspace (EL0) Real-Time audio server running at Delta Priority 110"
+
+[[bin]]
+name = "drv-audio"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }

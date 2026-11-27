@@ -1,0 +1,15 @@
+[package]
+name = "board-raspi02w"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Raspberry Pi Zero 2 W (RP3A0 / BCM2837, 512 MiB) board support crate for Hollow Star OS+"
+
+[features]
+default = []
+mini-uart = ["board-raspi3b/mini-uart"]
+wireless = []
+
+[dependencies]
+hal-core = { path = "../hal-core" }
+board-raspi3b = { path = "../board-raspi3b" }

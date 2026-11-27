@@ -10,7 +10,7 @@ hollow-star-os-plus/
 ├── delta.sh                  # Główny skrypt build/check/unit/smoke/ci
 ├── run-qemu.sh               # Wrapper uruchamiający obraz w qemu-system-aarch64 (-M raspi3b)
 ├── tools/
-│   └── mk_sdcard.py          # Generator testowego obrazu karty SD (MBR: FAT32 + ext2 + .hsapp)
+│   └── mk_sdcard.py          # Generator obrazu karty SD (MBR: /boot FAT32 + /system DeltaFS + /user DeltaFS)
 ├── docs/
 │   ├── architecture.md       # Specyfikacja IPC, Shm, capabilities i mikrojądra Delta
 │   ├── scheduler.md          # Projekt planisty inspirowanego BeOS
@@ -19,17 +19,18 @@ hollow-star-os-plus/
 ├── hal/                      # Warstwa abstrakcji sprzętu (łatwe portowanie między SBC)
 │   ├── hal-core/             # Cechy (traits): UART, Timer, IRQ, Mem, Board, DTB parser
 │   ├── board-raspi3b/        # BCM2837 (RPi 3B - główny target rozwojowy)
-│   └── board-raspi02w/       # RP3A0 / BCM2837 (RPi Zero 2 W - przyszły target)
+│   └── board-raspi02w/       # RP3A0 / BCM2837 (RPi Zero 2 W - 512 MiB target)
 ├── drivers/                  # Sterowniki jako osobne serwery w przestrzeni użytkownika
 │   ├── drv-uart/             # Serwer UART (EL0, svc.uart)
-│   ├── drv-fb/               # Framebuffer (HDMI / DSI / SPI)
+│   ├── drv-fb/               # Serwer Framebuffer/Mailbox (EL0, svc.fb, 640x480@32bpp)
 │   ├── drv-sd/               # Sterownik SD / eMMC (EL0, svc.sd, Arasan EMMC + IRQ 62)
-│   └── drv-audio/
-├── fs/                       # Serwer VFS + systemy plików (MBR, FAT32, ext2, /dev, /proc)
+│   └── drv-audio/            # Serwer Audio Real-Time (EL0, Priority 110, svc.audio)
+├── fs/                       # Serwer VFS + systemy plików (MBR, FAT32, DeltaFS WAL, ext2, /dev, /proc)
 ├── userland/
 │   ├── delta-abi/            # Współdzielone numery syscalli, błędy i struktury IPC/Shm (no_std)
 │   ├── libdelta/             # Syscalle (svc #0), IPC, Shm, VFS API, CRT0 _start
-│   ├── init/                 # Pierwszy proces EL0 sprawdzający serwery i uruchamiający /BIN/shell.elf
-│   └── shell/                # Interaktywna powłoka Unix-like ładowana z FAT32
+│   ├── init/                 # Pierwszy proces EL0 sprawdzający serwery i uruchamiający /system/bin/shell.elf
+│   └── shell/                # Interaktywna powłoka Unix-like ładowana z /system DeltaFS
 └── apps/
-    └── hello/                # Przykładowa aplikacja paczkowana jako Hello.hsapp/ (Assets/, exec, icon.png)
+    ├── hello/                # Przykładowa aplikacja paczkowana jako Hello.hsapp/ (Assets/, exec, icon.png)
+    └── hollow-star/          # Kompozytor Desktop, 1st Setup i aplikacje systemowe (HollowStar.hsapp/)

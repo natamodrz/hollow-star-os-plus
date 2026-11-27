@@ -4,30 +4,40 @@ pub mod elf;
 
 use core::ptr::copy_nonoverlapping;
 
-use delta_abi::{SdMmioInfo, UartKind, UartMmioInfo, errno};
+use delta_abi::{
+    AudioMmioInfo, DmaPageInfo, FbMmioInfo, SdMmioInfo, UartKind, UartMmioInfo, errno,
+};
 use hal_core::{MemoryRegion, PAGE_SIZE, PhysAddr, VirtAddr, mem::align_down, mem::align_up};
 
 use crate::arch;
 use crate::arch::mmu::{self, UserPageAttrs};
+use crate::board;
 use crate::mem::{phys_to_mut_ptr, pmm};
 use crate::sched::{self, Priority, ThreadId};
 use crate::sync::IrqSpinLock;
 
-pub const MAX_PROCS: usize = 16;
+pub const MAX_PROCS: usize = 24;
 
-/// Fixed virtual address where `drv-uart` receives its isolated 4 KiB UART MMIO page.
+/// Fixed virtual addresses where isolated EL0 driver servers receive Device MMIO pages.
 const USER_UART_MMIO_VA: usize = 0x0000_1000_0000;
-/// Fixed virtual address where `drv-sd` receives its isolated 4 KiB SD/EMMC MMIO page.
 const USER_SD_MMIO_VA: usize = 0x0000_1001_0000;
+const USER_FB_MBOX_VA: usize = 0x0000_1002_0000;
+const USER_AUDIO_MMIO_VA: usize = 0x0000_1003_0000;
+const USER_DMA_BASE_VA: usize = 0x0000_1800_0000;
 /// Starting virtual base for dynamic per-process shared memory (`Shm`) mappings.
 const USER_SHM_BASE_VA: usize = 0x0000_2000_0000;
-const MAX_USER_ELF_PAGES: usize = 64; // 256 KiB cap for user-spawned ELF images
+/// Fixed virtual base where `drv-fb` maps the physical VideoCore framebuffer aperture.
+const USER_FB_PHYS_VA: usize = 0x0000_3000_0000;
+const MAX_FB_MAP_BYTES: usize = 8 * 1024 * 1024;
+const MAX_USER_ELF_PAGES: usize = 128; // 512 KiB cap for user-spawned ELF images
 
 /// Device MMIO / IRQ grants supplied exclusively to EL0 driver servers.
 #[derive(Clone, Copy)]
 pub struct DeviceCaps {
     pub uart: Option<(MemoryRegion, UartKind)>,
     pub sd: Option<(MemoryRegion, u32)>,
+    pub display: Option<(MemoryRegion, usize)>,
+    pub audio: Option<MemoryRegion>,
 }
 
 impl DeviceCaps {
@@ -35,6 +45,8 @@ impl DeviceCaps {
         Self {
             uart: None,
             sd: None,
+            display: None,
+            audio: None,
         }
     }
 }
@@ -46,8 +58,11 @@ struct ProcessControlBlock {
     entry_pc: usize,
     user_sp: usize,
     next_shm_va: usize,
+    next_dma_va: usize,
     uart_mmio: Option<UartMmioInfo>,
     sd_mmio: Option<SdMmioInfo>,
+    fb_mmio: Option<FbMmioInfo>,
+    audio_mmio: Option<AudioMmioInfo>,
     waiter_tid: Option<ThreadId>,
     exited: bool,
     exit_code: usize,
@@ -62,8 +77,11 @@ impl ProcessControlBlock {
             entry_pc: 0,
             user_sp: 0,
             next_shm_va: USER_SHM_BASE_VA,
+            next_dma_va: USER_DMA_BASE_VA,
             uart_mmio: None,
             sd_mmio: None,
+            fb_mmio: None,
+            audio_mmio: None,
             waiter_tid: None,
             exited: false,
             exit_code: 0,
@@ -100,6 +118,23 @@ impl ProcessTable {
 
 static PROCS: IrqSpinLock<ProcessTable> = IrqSpinLock::new(ProcessTable::new());
 
+/// Helper mapping one 4 KiB device MMIO page for an EL0 driver process.
+fn map_device_mmio(
+    ttbr0_root: PhysAddr,
+    user_va_page: usize,
+    region: MemoryRegion,
+) -> Result<usize, elf::ElfError> {
+    let pa = PhysAddr(align_down(region.base, PAGE_SIZE));
+    let offset = region.base - pa.as_usize();
+    mmu::map_user_page(
+        ttbr0_root,
+        VirtAddr(user_va_page),
+        pa,
+        UserPageAttrs::DeviceMmio,
+    )?;
+    Ok(user_va_page + offset)
+}
+
 /// Spawns an EL0 user process from an ELF64 binary slice with optional device grants.
 pub fn spawn_elf(
     name: &'static str,
@@ -110,16 +145,8 @@ pub fn spawn_elf(
     let loaded = elf::load_elf64(elf_bytes)?;
 
     let uart_mmio = if let Some((region, kind)) = devices.uart {
-        let pa = PhysAddr(align_down(region.base, PAGE_SIZE));
-        let offset = region.base - pa.as_usize();
-        mmu::map_user_page(
-            loaded.ttbr0_root,
-            VirtAddr(USER_UART_MMIO_VA),
-            pa,
-            UserPageAttrs::DeviceMmio,
-        )?;
         Some(UartMmioInfo {
-            virt_base: USER_UART_MMIO_VA + offset,
+            virt_base: map_device_mmio(loaded.ttbr0_root, USER_UART_MMIO_VA, region)?,
             kind: kind as u32,
             _pad: 0,
         })
@@ -128,18 +155,27 @@ pub fn spawn_elf(
     };
 
     let sd_mmio = if let Some((region, irq_num)) = devices.sd {
-        let pa = PhysAddr(align_down(region.base, PAGE_SIZE));
-        let offset = region.base - pa.as_usize();
-        mmu::map_user_page(
-            loaded.ttbr0_root,
-            VirtAddr(USER_SD_MMIO_VA),
-            pa,
-            UserPageAttrs::DeviceMmio,
-        )?;
         Some(SdMmioInfo {
-            virt_base: USER_SD_MMIO_VA + offset,
+            virt_base: map_device_mmio(loaded.ttbr0_root, USER_SD_MMIO_VA, region)?,
             irq_num,
             _pad: 0,
+        })
+    } else {
+        None
+    };
+
+    let fb_mmio = if let Some((region, vc_bus_offset)) = devices.display {
+        Some(FbMmioInfo {
+            mbox_virt_base: map_device_mmio(loaded.ttbr0_root, USER_FB_MBOX_VA, region)?,
+            vc_bus_offset,
+        })
+    } else {
+        None
+    };
+
+    let audio_mmio = if let Some(region) = devices.audio {
+        Some(AudioMmioInfo {
+            virt_base: map_device_mmio(loaded.ttbr0_root, USER_AUDIO_MMIO_VA, region)?,
         })
     } else {
         None
@@ -157,8 +193,11 @@ pub fn spawn_elf(
             entry_pc: loaded.entry_pc,
             user_sp: loaded.user_sp,
             next_shm_va: USER_SHM_BASE_VA,
+            next_dma_va: USER_DMA_BASE_VA,
             uart_mmio,
             sd_mmio,
+            fb_mmio,
+            audio_mmio,
             waiter_tid: None,
             exited: false,
             exit_code: 0,
@@ -301,6 +340,82 @@ pub fn uart_mmio_info(pid: u64) -> Option<UartMmioInfo> {
 pub fn sd_mmio_info(pid: u64) -> Option<SdMmioInfo> {
     let table = PROCS.lock();
     table.find_by_pid(pid).and_then(|p| p.sd_mmio)
+}
+
+/// Returns the isolated Mailbox/display MMIO info if `pid` holds display capability.
+pub fn fb_mmio_info(pid: u64) -> Option<FbMmioInfo> {
+    let table = PROCS.lock();
+    table.find_by_pid(pid).and_then(|p| p.fb_mmio)
+}
+
+/// Returns the isolated PWM/audio MMIO info if `pid` holds audio capability.
+pub fn audio_mmio_info(pid: u64) -> Option<AudioMmioInfo> {
+    let table = PROCS.lock();
+    table.find_by_pid(pid).and_then(|p| p.audio_mmio)
+}
+
+/// Allocates one non-cacheable DMA 4 KiB page for an authorized display/audio/SD driver.
+pub fn alloc_dma_page(pid: u64, ttbr0_root: PhysAddr) -> Result<DmaPageInfo, isize> {
+    let va = {
+        let mut table = PROCS.lock();
+        let p = table.find_by_pid_mut(pid).ok_or(errno::ENOENT)?;
+        if p.fb_mmio.is_none() && p.audio_mmio.is_none() && p.sd_mmio.is_none() {
+            return Err(errno::EPERM);
+        }
+        let va = p.next_dma_va;
+        p.next_dma_va = va.checked_add(2 * PAGE_SIZE).ok_or(errno::ENOMEM)?;
+        va
+    };
+
+    let pa = pmm::alloc_zeroed_frame().ok_or(errno::ENOMEM)?;
+    if mmu::map_user_page(ttbr0_root, VirtAddr(va), pa, UserPageAttrs::NormalNc).is_err() {
+        let _ = pmm::free_frame(pa);
+        return Err(errno::ENOMEM);
+    }
+    Ok(DmaPageInfo {
+        phys_addr: pa.as_usize(),
+        user_va: va,
+    })
+}
+
+/// Maps the VideoCore/display framebuffer aperture into `drv-fb` if authorized and bounded.
+pub fn map_fb_phys(
+    pid: u64,
+    ttbr0_root: PhysAddr,
+    phys_addr: usize,
+    size_bytes: usize,
+) -> Result<usize, isize> {
+    if fb_mmio_info(pid).is_none() {
+        return Err(errno::EPERM);
+    }
+    let Some((win_base, win_size)) = board::framebuffer_phys_window() else {
+        return Err(errno::ENOENT);
+    };
+    if size_bytes == 0 || size_bytes > MAX_FB_MAP_BYTES {
+        return Err(errno::EINVAL);
+    }
+
+    let aligned_pa = align_down(phys_addr, PAGE_SIZE);
+    let offset = phys_addr - aligned_pa;
+    let map_bytes = align_up(offset + size_bytes, PAGE_SIZE);
+    let end_pa = aligned_pa.checked_add(map_bytes).ok_or(errno::EINVAL)?;
+    let win_end = win_base.saturating_add(win_size);
+    if aligned_pa < win_base || end_pa > win_end {
+        return Err(errno::EPERM);
+    }
+
+    let pages = map_bytes / PAGE_SIZE;
+    for i in 0..pages {
+        mmu::map_user_page(
+            ttbr0_root,
+            VirtAddr(USER_FB_PHYS_VA + i * PAGE_SIZE),
+            PhysAddr(aligned_pa + i * PAGE_SIZE),
+            UserPageAttrs::NormalNc,
+        )
+        .map_err(|_| errno::ENOMEM)?;
+    }
+
+    Ok(USER_FB_PHYS_VA + offset)
 }
 
 /// Returns `true` if `pid` was granted capability to handle peripheral IRQ `irq_num`.

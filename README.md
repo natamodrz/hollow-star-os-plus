@@ -13,18 +13,17 @@ A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Micr
 
 ---
 
-## Architecture & Planned Features
+## Architecture & Implemented Features
 
 - **Delta Microkernel (`kernel/`, EL1):**
-  - Strictly hardware-agnostic kernel code — all SoC MMIO addresses are isolated in board crates (`hal/board-raspi3b`, future `hal/board-raspi02w`) behind `hal-core` traits and Device Tree Blob (`DTB`) parsing.
-  - Physical 4 KiB frame allocator, AArch64 MMU with W^X kernel permissions (`TTBR0_EL1` isolated per-process EL0 + `TTBR1_EL1` higher-half kernel), EL1 exception vector table, and ARM Generic Timer IRQ handling.
+  - Strictly hardware-agnostic kernel code — all SoC MMIO addresses are isolated in board crates (`hal/board-raspi3b`, `hal/board-raspi02w`) behind `hal-core` traits and Device Tree Blob (`DTB`) parsing.
+  - Physical 4 KiB frame allocator, AArch64 MMU with W^X kernel permissions (`TTBR0_EL1` isolated per-process EL0 + `TTBR1_EL1` higher-half kernel + `NormalNc` DMA/VRAM), EL1 exception vector table, and ARM Generic Timer IRQ handling.
   - **BeOS-Inspired SMP Multimedia Scheduler (M3):** 4-core Cortex-A53 SMP with priority tiers `1..=120` including Real-Time audio/video (`100..=120`) and priority inheritance on IPC.
-  - **Capability, Port IPC, Shm & IRQ Forwarding (M4–M5):** Synchronous/asynchronous port message passing (`svc.uart`, `svc.sd`, `svc.vfs`), zero-copy `Shm` buffers, userspace peripheral IRQ forwarding, and EL0 drivers (`drv-uart`, `drv-sd`, `vfsd`).
-- **Storage, Shell & Userspace Parity (`drivers/`, `fs/`, `userland/`, `apps/`):**
-  - **Userspace Storage & VFS (M5):** EL0 BCM2837 Arasan EMMC driver (`drv-sd`), MBR partition parser, **FAT32** (RW + VFAT LFN) + **ext2** (RO) + `/dev` + `/proc`, interactive `/BIN/shell.elf`, and `.hsapp` app bundle execution (`/Hello.hsapp/exec`).
-  - **First-Time Setup Wizard (planned M6):** Language (`English` default / `Polski`) → Wi-Fi *(wireless boards only)* → Time → Hollow Star welcome screen.
-  - **Board Capability Adaptation (planned M6):** Wireless/Bluetooth/FTP features are cleanly disabled and hidden from UI/menus on non-wireless builds or hardware variants without wireless radios.
-  - **Core Apps & `.hsapp` Bundles (M5–M6):** Self-contained macOS-style `<AppName>.hsapp/` bundles (`Assets/` for libraries/icons/textures, `exec` ELF binary, `icon.png` app icon), powering the dual/multi-drive File Explorer, Markdown Notes (`.md` + preview), System Info Monitor, Expression Calculator, Media/MP3 Player leveraging Delta RT audio priorities, Classic Games, and universal `F1` help overlays.
+  - **Capability, Port IPC, Shm & IRQ Forwarding (M4–M6):** Synchronous/asynchronous port message passing (`svc.uart`, `svc.sd`, `svc.vfs`, `svc.fb`, `svc.audio`), zero-copy `Shm` buffers, userspace peripheral IRQ forwarding, and EL0 drivers.
+- **Separated Storage (`DeltaFS` + 3-Partition MBR), Display, RT Audio & Desktop (`drivers/`, `fs/`, `userland/`, `apps/`):**
+  - **3-Partition Layout & DeltaFS WAL Journaling (M5–M6):** Separated **`/boot`** (`FAT32`), **`/system`** (**DeltaFS** with CRC32 + Write-Ahead Journal + `.hsapp` bundle metadata), and **`/user`** (**DeltaFS** user config/notes/media with online partition expansion to end of SD card), plus `/dev` and `/proc`.
+  - **Display & Real-Time Audio Servers (M6):** Isolated `drv-fb` VideoCore Mailbox `640x480@32bpp` framebuffer + SoC thermal sensor, and `drv-audio` running at Delta Scheduler **Real-Time Priority `110`**.
+  - **Desktop Compositor & `1st Setup` (`HollowStar.hsapp`, M6):** Bilingual **`English` / `Polski`** UI, `1st Setup` wizard, universal **`F1`** help overlay, automatic hiding of Wi-Fi/BT/FTP controls on non-wireless builds, System Monitor (`/boot`, `/system`, `/user` stats & expand), Markdown Notes, File Explorer, RT Media Player, Calculator (`^`, `sqrt`, `F2` fractions), Classic Games (`Brick Breaker`, `Tetris`, `Racing`), and Settings.
 
 ---
 
@@ -33,8 +32,8 @@ A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Micr
 | Target | SoC / CPU | RAM | Status |
 | :--- | :--- | :--- | :--- |
 | **QEMU `raspi3b`** | Emulated BCM2837 (4× Cortex-A53) | 1 GB | Primary automated CI target (`./delta.sh smoke`) |
-| **Raspberry Pi 3B** | BCM2837 (4× Cortex-A53, Wi-Fi/BT) | 1 GB | Primary physical development target |
-| **Raspberry Pi Zero 2 W** | RP3A0 / BCM2837 (4× Cortex-A53, microSD, CYW43439) | 512 MB | Secondary/future target (`hal/board-raspi02w`) |
+| **Raspberry Pi 3B** | BCM2837 (4× Cortex-A53) | 1 GB | Primary physical development target (`hal/board-raspi3b`) |
+| **Raspberry Pi Zero 2 W** | RP3A0 / BCM2837 (4× Cortex-A53) | 512 MB | Secondary target (`hal/board-raspi02w`) |
 
 ---
 

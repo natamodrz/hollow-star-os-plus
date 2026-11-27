@@ -33,6 +33,8 @@ static M2_HIGHER_HALF_PROBE: u64 = BANNER_MAGIC;
 
 static DRV_UART_ELF: &[u8] = include_bytes!(env!("DRV_UART_ELF"));
 static DRV_SD_ELF: &[u8] = include_bytes!(env!("DRV_SD_ELF"));
+static DRV_FB_ELF: &[u8] = include_bytes!(env!("DRV_FB_ELF"));
+static DRV_AUDIO_ELF: &[u8] = include_bytes!(env!("DRV_AUDIO_ELF"));
 static VFSD_ELF: &[u8] = include_bytes!(env!("VFSD_ELF"));
 static INIT_ELF: &[u8] = include_bytes!(env!("INIT_ELF"));
 
@@ -50,6 +52,7 @@ static SMP_EXEC_MASK: AtomicU8 = AtomicU8::new(0);
 pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     let mut active_board = board::init();
     let info = active_board.info();
+    board::register_metadata(info, active_board.framebuffer_phys_window());
     let el = arch::current_el();
     let core = arch::core_id();
     let layout = KernelLayout::from_linker();
@@ -185,13 +188,13 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
         let _ = writeln!(
             out,
-            "[el0]  Starting EL0 servers (drv-uart, drv-sd, vfsd, init)..."
+            "[el0]  Starting EL0 servers (drv-uart, drv-sd, vfsd, drv-fb, drv-audio, init)..."
         );
     }
     active_board.console().flush();
 
-    // Launch EL0 system servers (`drv-uart`, `drv-sd`, `vfsd`) + `init`.
-    // Only `drv-uart` and `drv-sd` receive their respective isolated 4 KiB Device MMIO pages.
+    // Launch EL0 system servers (`drv-uart`, `drv-sd`, `vfsd`, `drv-fb`, `drv-audio`) + `init`.
+    // Only driver servers receive their isolated 4 KiB Device MMIO pages.
     let uart_region = active_board.uart_mmio_region();
     let uart_kind = if cfg!(feature = "mini-uart") {
         UartKind::MiniUart
@@ -205,20 +208,46 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         Priority::URGENT,
         DeviceCaps {
             uart: Some((uart_region, uart_kind)),
-            sd: None,
+            ..DeviceCaps::none()
         },
     )
     .expect("spawn EL0 drv-uart server");
 
-    let sd_caps = DeviceCaps {
-        uart: None,
-        sd: active_board.sd_mmio_region(),
-    };
-    let _drv_sd_pid = proc::spawn_elf("drv-sd", DRV_SD_ELF, Priority::URGENT, sd_caps)
-        .expect("spawn EL0 drv-sd server");
+    let _drv_sd_pid = proc::spawn_elf(
+        "drv-sd",
+        DRV_SD_ELF,
+        Priority::URGENT,
+        DeviceCaps {
+            sd: active_board.sd_mmio_region(),
+            ..DeviceCaps::none()
+        },
+    )
+    .expect("spawn EL0 drv-sd server");
 
     let _vfsd_pid = proc::spawn_elf("vfsd", VFSD_ELF, Priority::URGENT, DeviceCaps::none())
         .expect("spawn EL0 vfsd server");
+
+    let _drv_fb_pid = proc::spawn_elf(
+        "drv-fb",
+        DRV_FB_ELF,
+        Priority::DISPLAY,
+        DeviceCaps {
+            display: active_board.mailbox_mmio_region(),
+            ..DeviceCaps::none()
+        },
+    )
+    .expect("spawn EL0 drv-fb server");
+
+    let _drv_audio_pid = proc::spawn_elf(
+        "drv-audio",
+        DRV_AUDIO_ELF,
+        Priority::new(110), // Real-Time Audio priority tier
+        DeviceCaps {
+            audio: active_board.audio_mmio_region(),
+            ..DeviceCaps::none()
+        },
+    )
+    .expect("spawn EL0 drv-audio server");
 
     let _init_pid = proc::spawn_elf("init", INIT_ELF, Priority::NORMAL, DeviceCaps::none())
         .expect("spawn EL0 init process");

@@ -2,11 +2,14 @@
 
 use core::mem::size_of;
 
-use delta_abi::{IpcMessage, SdMmioInfo, SyscallId, UartMmioInfo, errno};
-use hal_core::InterruptController;
+use delta_abi::{
+    AudioMmioInfo, FbMmioInfo, IpcMessage, SdMmioInfo, SysCaps, SyscallId, UartMmioInfo, errno,
+};
+use hal_core::{InterruptController, PAGE_SIZE};
 
 use crate::arch::exceptions::TrapFrame;
-use crate::{board, ipc, proc, sched, shm};
+use crate::mem::pmm;
+use crate::{arch, board, ipc, proc, sched, shm};
 
 /// Dispatches an AArch64 `svc #0` call from EL0 using `x8` as syscall ID
 /// and `x0..x5` as arguments, returning the result value for `x0`.
@@ -45,6 +48,26 @@ pub fn dispatch(tf: &TrapFrame) -> isize {
             Ok(code) => code as isize,
             Err(e) => e,
         },
+        SyscallId::GetSysCaps => {
+            let mut caps = SysCaps::empty();
+            let pmm_stats = pmm::stats();
+            caps.ram_total_bytes = (pmm_stats.total_ram_frames * PAGE_SIZE) as u64;
+            caps.ram_free_bytes = (pmm_stats.free_frames * PAGE_SIZE) as u64;
+            caps.uptime_ms = arch::exceptions::timer_ticks() * 10;
+            if let Some(info) = board::info() {
+                caps.cpu_count = info.cpu_count as u8;
+                caps.has_wifi = u8::from(info.has_wifi);
+                caps.has_bluetooth = u8::from(info.has_bluetooth);
+                let name_bytes = info.name.as_bytes();
+                let n = name_bytes.len().min(caps.board_name.len());
+                caps.board_name[..n].copy_from_slice(&name_bytes[..n]);
+                caps.board_name_len = n as u8;
+            }
+            match copy_struct_to_user::<SysCaps>(ttbr0, a0, &caps) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
         SyscallId::PortCreate => match ipc::port_create(pid, tid, a0) {
             Ok(cap) => cap as isize,
             Err(e) => e,
@@ -144,6 +167,35 @@ pub fn dispatch(tf: &TrapFrame) -> isize {
             }
             board::irq_handle().enable_peripheral_irq(irq_num);
             0
+        }
+        SyscallId::GetFbMmioInfo => {
+            let Some(info) = proc::fb_mmio_info(pid) else {
+                return errno::EPERM;
+            };
+            match copy_struct_to_user::<FbMmioInfo>(ttbr0, a0, &info) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        SyscallId::MapFbPhys => match proc::map_fb_phys(pid, ttbr0, a0, a1) {
+            Ok(va) => va as isize,
+            Err(e) => e,
+        },
+        SyscallId::AllocDmaPage => match proc::alloc_dma_page(pid, ttbr0) {
+            Ok(info) => match copy_struct_to_user(ttbr0, a0, &info) {
+                Ok(()) => 0,
+                Err(e) => e,
+            },
+            Err(e) => e,
+        },
+        SyscallId::GetAudioMmioInfo => {
+            let Some(info) = proc::audio_mmio_info(pid) else {
+                return errno::EPERM;
+            };
+            match copy_struct_to_user::<AudioMmioInfo>(ttbr0, a0, &info) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
         }
         SyscallId::ShmCreate => match shm::create(pid, ttbr0, a0) {
             Ok((shm_id, va)) => match copy_struct_to_user::<usize>(ttbr0, a1, &va) {

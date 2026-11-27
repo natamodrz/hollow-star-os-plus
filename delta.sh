@@ -8,8 +8,9 @@ TARGET="${TARGET:-aarch64-unknown-none}"
 KERNEL_PKG="${KERNEL_PKG:-kernel}"
 PROFILE="${PROFILE:-debug}"                 # debug | release
 UART_MODE="${UART_MODE:-pl011}"             # pl011 (-serial stdio) | mini (-serial null -serial stdio)
-SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-8}"         # maks. czas oczekiwania w sekundach
-EXPECT_MARKER="${EXPECT_MARKER:-Milestone M5}"
+QEMU_DISPLAY="${QEMU_DISPLAY:-none}"       # none | default (okno GUI dla cmd_run)
+SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-10}"       # maks. czas oczekiwania w sekundach
+EXPECT_MARKER="${EXPECT_MARKER:-Milestone M6}"
 
 # Lista crate'ów niezależnych od sprzętu, dla których odpalamy unit testy na hoście (macOS/Linux)
 HOST_TEST_PKGS="${HOST_TEST_PKGS:-hal-core vfs-server}"
@@ -52,9 +53,10 @@ build_sdcard_img() {
   if [ -f "tools/mk_sdcard.py" ]; then
     local shell_elf="target/userland/$TARGET/release/shell"
     local hello_elf="target/userland/$TARGET/release/hello"
-    if [ -f "$shell_elf" ] && [ -f "$hello_elf" ]; then
-      info "Tworzenie obrazu karty SD ($SD_IMG: FAT32 + ext2 + .hsapp)..."
-      python3 tools/mk_sdcard.py "$shell_elf" "$hello_elf" "$SD_IMG"
+    local hollow_elf="target/userland/$TARGET/release/hollow-star"
+    if [ -f "$shell_elf" ] && [ -f "$hello_elf" ] && [ -f "$hollow_elf" ]; then
+      info "Tworzenie obrazu karty SD ($SD_IMG: /boot FAT32 + /system DeltaFS + /user DeltaFS + .hsapp)..."
+      python3 tools/mk_sdcard.py "$shell_elf" "$hello_elf" "$hollow_elf" "$SD_IMG"
     fi
   fi
 }
@@ -131,7 +133,7 @@ cmd_run() {
   # shellcheck disable=SC2046
   qemu-system-aarch64 \
     -M raspi3b \
-    -display none \
+    -display "$QEMU_DISPLAY" \
     $(qemu_uart_args) \
     $(qemu_sd_args) \
     -kernel "$KERNEL_IMG"
@@ -143,7 +145,7 @@ cmd_gdb() {
   # shellcheck disable=SC2046
   qemu-system-aarch64 \
     -M raspi3b \
-    -display none \
+    -display "$QEMU_DISPLAY" \
     $(qemu_uart_args) \
     $(qemu_sd_args) \
     -kernel "$KERNEL_IMG" \
@@ -164,7 +166,7 @@ cmd_smoke() {
   # shellcheck disable=SC2046
   qemu-system-aarch64 \
     -M raspi3b \
-    -display none \
+    -display "$QEMU_DISPLAY" \
     $(qemu_uart_args) \
     $(qemu_sd_args) \
     -kernel "$KERNEL_IMG" \
