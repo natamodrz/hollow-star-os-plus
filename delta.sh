@@ -8,15 +8,16 @@ TARGET="${TARGET:-aarch64-unknown-none}"
 KERNEL_PKG="${KERNEL_PKG:-kernel}"
 PROFILE="${PROFILE:-debug}"                 # debug | release
 UART_MODE="${UART_MODE:-pl011}"             # pl011 (-serial stdio) | mini (-serial null -serial stdio)
-SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-5}"         # maks. czas oczekiwania w sekundach
-EXPECT_MARKER="${EXPECT_MARKER:-Hollow Star OS+}"
+SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-8}"         # maks. czas oczekiwania w sekundach
+EXPECT_MARKER="${EXPECT_MARKER:-Milestone M5}"
 
 # Lista crate'ów niezależnych od sprzętu, dla których odpalamy unit testy na hoście (macOS/Linux)
-HOST_TEST_PKGS="${HOST_TEST_PKGS:-hal-core}"
+HOST_TEST_PKGS="${HOST_TEST_PKGS:-hal-core vfs-server}"
 
 BUILD_DIR="target/$TARGET/$PROFILE"
 KERNEL_ELF="$BUILD_DIR/$KERNEL_PKG"
 KERNEL_IMG="target/kernel8.img"
+SD_IMG="target/sdcard.img"
 LOG_FILE="target/qemu-smoke.log"
 
 # Kolory w terminalu
@@ -47,6 +48,23 @@ qemu_uart_args() {
   fi
 }
 
+build_sdcard_img() {
+  if [ -f "tools/mk_sdcard.py" ]; then
+    local shell_elf="target/userland/$TARGET/release/shell"
+    local hello_elf="target/userland/$TARGET/release/hello"
+    if [ -f "$shell_elf" ] && [ -f "$hello_elf" ]; then
+      info "Tworzenie obrazu karty SD ($SD_IMG: FAT32 + ext2 + .hsapp)..."
+      python3 tools/mk_sdcard.py "$shell_elf" "$hello_elf" "$SD_IMG"
+    fi
+  fi
+}
+
+qemu_sd_args() {
+  if [ -f "$SD_IMG" ]; then
+    echo "-drive file=$SD_IMG,if=sd,format=raw"
+  fi
+}
+
 cmd_build() {
   info "Kompilacja $KERNEL_PKG ($TARGET, tryb: $PROFILE)..."
   local flags=(--package "$KERNEL_PKG" --target "$TARGET")
@@ -73,14 +91,16 @@ cmd_build() {
   local size_bytes
   size_bytes=$(wc -c < "$KERNEL_IMG" | tr -d ' ')
   ok "Zbudowano $KERNEL_IMG ($size_bytes B)"
+
+  build_sdcard_img
 }
 
 cmd_check() {
   info "Sprawdzanie formatowania (rustfmt)..."
   cargo fmt --all -- --check
 
-  info "Analiza statyczna (clippy) dla $KERNEL_PKG..."
-  cargo clippy --package "$KERNEL_PKG" --target "$TARGET" -- -D warnings
+  info "Analiza statyczna (clippy) dla calego workspace..."
+  cargo clippy --workspace --target "$TARGET" -- -D warnings
   ok "Check zakonczony bez bledow"
 }
 
@@ -92,7 +112,7 @@ cmd_unit() {
   for pkg in $HOST_TEST_PKGS; do
     if cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q "\"name\":\"$pkg\""; then
       info "Testuje crate: $pkg"
-      cargo test --package "$pkg" --target "$host_target"
+      cargo test --package "$pkg" --lib --target "$host_target"
     else
       info "Pomijam nieistniejacy jeszcze crate: $pkg"
     fi
@@ -113,6 +133,7 @@ cmd_run() {
     -M raspi3b \
     -display none \
     $(qemu_uart_args) \
+    $(qemu_sd_args) \
     -kernel "$KERNEL_IMG"
 }
 
@@ -124,6 +145,7 @@ cmd_gdb() {
     -M raspi3b \
     -display none \
     $(qemu_uart_args) \
+    $(qemu_sd_args) \
     -kernel "$KERNEL_IMG" \
     -s -S
 }
@@ -144,6 +166,7 @@ cmd_smoke() {
     -M raspi3b \
     -display none \
     $(qemu_uart_args) \
+    $(qemu_sd_args) \
     -kernel "$KERNEL_IMG" \
     > "$LOG_FILE" 2>&1 &
   local qemu_pid=$!
@@ -207,7 +230,7 @@ cmd_ci() {
 }
 
 cmd_clean() {
-  rm -f "$KERNEL_IMG" "$LOG_FILE"
+  rm -f "$KERNEL_IMG" "$SD_IMG" "$LOG_FILE"
   cargo clean
   ok "Wyczyszczono artefakty kompilacji"
 }

@@ -4,36 +4,50 @@ version = 4
 
 [[package]]
 name = "board-raspi3b"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hal-core",
 ]
 
 [[package]]
 name = "delta-abi"
-version = "0.4.0"
+version = "0.5.0"
+
+[[package]]
+name = "drv-sd"
+version = "0.5.0"
+dependencies = [
+ "libdelta",
+]
 
 [[package]]
 name = "drv-uart"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "hal-core"
-version = "0.4.0"
+version = "0.5.0"
+
+[[package]]
+name = "hello-app"
+version = "0.5.0"
+dependencies = [
+ "libdelta",
+]
 
 [[package]]
 name = "init"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libdelta",
 ]
 
 [[package]]
 name = "kernel"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "board-raspi3b",
  "delta-abi",
@@ -42,7 +56,21 @@ dependencies = [
 
 [[package]]
 name = "libdelta"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "delta-abi",
+]
+
+[[package]]
+name = "shell"
+version = "0.5.0"
+dependencies = [
+ "libdelta",
+]
+
+[[package]]
+name = "vfs-server"
+version = "0.5.0"
+dependencies = [
+ "libdelta",
 ]

@@ -1,0 +1,19 @@
+[package]
+name = "vfs-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Userspace (EL0) VFS, MBR, FAT32, and ext2 server for Hollow Star OS+"
+
+[lib]
+name = "vfs_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vfsd"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../userland/libdelta" }

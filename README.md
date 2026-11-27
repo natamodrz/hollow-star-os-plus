@@ -17,13 +17,14 @@ A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Micr
 
 - **Delta Microkernel (`kernel/`, EL1):**
   - Strictly hardware-agnostic kernel code — all SoC MMIO addresses are isolated in board crates (`hal/board-raspi3b`, future `hal/board-raspi02w`) behind `hal-core` traits and Device Tree Blob (`DTB`) parsing.
-  - Physical 4 KiB frame allocator, AArch64 MMU with W^X kernel permissions (`TTBR0_EL1` identity/user + `TTBR1_EL1` higher-half kernel), EL1 exception vector table, and ARM Generic Timer IRQ handling.
-  - **BeOS-Inspired SMP Multimedia Scheduler (planned M3):** Priority tiers `1..=120` including Real-Time audio/video (`100..=120`) and priority inheritance on IPC/mutexes.
-  - **Capability & Port IPC (planned M4):** Synchronous/asynchronous port message passing and userspace IRQ forwarding.
-- **Userspace Parity with Hollow Star OS Basic (`userland/`, `apps/`, planned M5–M6):**
-  - **First-Time Setup Wizard:** Language (`English` default / `Polski`) → Wi-Fi *(wireless boards only)* → Time → Hollow Star welcome screen.
-  - **Board Capability Adaptation:** Wireless/Bluetooth/FTP features are cleanly disabled and hidden from UI/menus on non-wireless builds or hardware variants without wireless radios.
-  - **Core Apps & `.hsapp` Bundles:** Self-contained macOS-style `<AppName>.hsapp/` bundles (`Assets/` for libraries/icons/textures, `exec` ELF binary, `icon.png` app icon), powering the dual/multi-drive File Explorer, Markdown Notes (`.md` + preview), System Info Monitor, Expression Calculator, Media/MP3 Player leveraging Delta RT audio priorities, Classic Games, and universal `F1` help overlays.
+  - Physical 4 KiB frame allocator, AArch64 MMU with W^X kernel permissions (`TTBR0_EL1` isolated per-process EL0 + `TTBR1_EL1` higher-half kernel), EL1 exception vector table, and ARM Generic Timer IRQ handling.
+  - **BeOS-Inspired SMP Multimedia Scheduler (M3):** 4-core Cortex-A53 SMP with priority tiers `1..=120` including Real-Time audio/video (`100..=120`) and priority inheritance on IPC.
+  - **Capability, Port IPC, Shm & IRQ Forwarding (M4–M5):** Synchronous/asynchronous port message passing (`svc.uart`, `svc.sd`, `svc.vfs`), zero-copy `Shm` buffers, userspace peripheral IRQ forwarding, and EL0 drivers (`drv-uart`, `drv-sd`, `vfsd`).
+- **Storage, Shell & Userspace Parity (`drivers/`, `fs/`, `userland/`, `apps/`):**
+  - **Userspace Storage & VFS (M5):** EL0 BCM2837 Arasan EMMC driver (`drv-sd`), MBR partition parser, **FAT32** (RW + VFAT LFN) + **ext2** (RO) + `/dev` + `/proc`, interactive `/BIN/shell.elf`, and `.hsapp` app bundle execution (`/Hello.hsapp/exec`).
+  - **First-Time Setup Wizard (planned M6):** Language (`English` default / `Polski`) → Wi-Fi *(wireless boards only)* → Time → Hollow Star welcome screen.
+  - **Board Capability Adaptation (planned M6):** Wireless/Bluetooth/FTP features are cleanly disabled and hidden from UI/menus on non-wireless builds or hardware variants without wireless radios.
+  - **Core Apps & `.hsapp` Bundles (M5–M6):** Self-contained macOS-style `<AppName>.hsapp/` bundles (`Assets/` for libraries/icons/textures, `exec` ELF binary, `icon.png` app icon), powering the dual/multi-drive File Explorer, Markdown Notes (`.md` + preview), System Info Monitor, Expression Calculator, Media/MP3 Player leveraging Delta RT audio priorities, Classic Games, and universal `F1` help overlays.
 
 ---
 
@@ -61,6 +62,7 @@ This repository follows strict **Semantic Versioning** (`MAJOR.MINOR.PATCH`):
 ### Prerequisites
 - Rust toolchain (`stable` with target `aarch64-unknown-none` and components `rustfmt`, `clippy`, `llvm-tools`, `rust-src` — pinned in [rust-toolchain.toml](rust-toolchain.toml))
 - `qemu-system-aarch64` (e.g. `brew install qemu` on macOS)
+- `python3` (used by `tools/mk_sdcard.py` to generate the test `target/sdcard.img` MBR FAT32+ext2 image)
 
 ### Commands
 ```bash
@@ -70,7 +72,7 @@ This repository follows strict **Semantic Versioning** (`MAJOR.MINOR.PATCH`):
 # Formatting and Clippy checks (-D warnings)
 ./delta.sh check
 
-# Host unit tests for hardware-independent crates (hal-core)
+# Host unit tests for hardware-independent crates (hal-core, vfs-server)
 ./delta.sh unit
 
 # Non-blocking QEMU raspi3b boot smoke test

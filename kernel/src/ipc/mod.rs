@@ -1,15 +1,18 @@
-//! Capability-based port IPC and named service registry for Delta Kernel.
+//! Capability-based port IPC, named service registry, and EL0 IRQ forwarding.
 
-use delta_abi::{IpcMessage, errno, rights};
+use delta_abi::{IpcMessage, MSG_IRQ_NOTIFY, errno, rights};
+use hal_core::InterruptController;
 
 use crate::sched::{self, Priority, ThreadId};
 use crate::sync::IrqSpinLock;
+use crate::{board, proc};
 
 const MAX_PORTS: usize = 32;
 const PORT_QUEUE_CAP: usize = 16;
 const MAX_WAITERS: usize = 8;
 const MAX_SERVICES: usize = 16;
-const MAX_CAPS_TOTAL: usize = 128;
+const MAX_CAPS_TOTAL: usize = 256;
+const MAX_IRQ_LINES: usize = 128;
 
 #[derive(Clone, Copy)]
 struct CapabilityEntry {
@@ -38,6 +41,7 @@ impl CapabilityEntry {
 struct Port {
     in_use: bool,
     capacity: usize,
+    owner_pid: u64,
     owner_tid: ThreadId,
     queue: [IpcMessage; PORT_QUEUE_CAP],
     head: usize,
@@ -52,6 +56,7 @@ impl Port {
         Self {
             in_use: false,
             capacity: PORT_QUEUE_CAP,
+            owner_pid: 0,
             owner_tid: ThreadId(0),
             queue: [const { IpcMessage::new(0) }; PORT_QUEUE_CAP],
             head: 0,
@@ -124,6 +129,7 @@ struct IpcState {
     ports: [Port; MAX_PORTS],
     caps: [CapabilityEntry; MAX_CAPS_TOTAL],
     services: [ServiceEntry; MAX_SERVICES],
+    irq_ports: [Option<usize>; MAX_IRQ_LINES],
     next_cap_handle: usize,
 }
 
@@ -133,17 +139,24 @@ impl IpcState {
             ports: [const { Port::empty() }; MAX_PORTS],
             caps: [const { CapabilityEntry::empty() }; MAX_CAPS_TOTAL],
             services: [const { ServiceEntry::empty() }; MAX_SERVICES],
+            irq_ports: [None; MAX_IRQ_LINES],
             next_cap_handle: 1,
         }
     }
 
-    fn alloc_port(&mut self, capacity: usize, owner_tid: ThreadId) -> Result<usize, isize> {
+    fn alloc_port(
+        &mut self,
+        capacity: usize,
+        owner_pid: u64,
+        owner_tid: ThreadId,
+    ) -> Result<usize, isize> {
         let cap = capacity.clamp(1, PORT_QUEUE_CAP);
         for (idx, p) in self.ports.iter_mut().enumerate() {
             if !p.in_use {
                 *p = Port::empty();
                 p.in_use = true;
                 p.capacity = cap;
+                p.owner_pid = owner_pid;
                 p.owner_tid = owner_tid;
                 return Ok(idx);
             }
@@ -209,13 +222,60 @@ static IPC: IrqSpinLock<IpcState> = IrqSpinLock::new(IpcState::new());
 /// Creates a new IPC port for `(owner_pid, owner_tid)` and returns a full-rights capability.
 pub fn port_create(owner_pid: u64, owner_tid: ThreadId, capacity: usize) -> Result<usize, isize> {
     let mut ipc = IPC.lock();
-    let port_id = ipc.alloc_port(capacity, owner_tid)?;
+    let port_id = ipc.alloc_port(capacity, owner_pid, owner_tid)?;
     match ipc.insert_cap(owner_pid, port_id, rights::ALL, false) {
         Ok(handle) => Ok(handle),
         Err(e) => {
             ipc.free_port(port_id);
             Err(e)
         }
+    }
+}
+
+/// Returns the owning PID of a port capability held by `caller_pid`.
+pub fn port_owner_pid(caller_pid: u64, cap_handle: usize) -> Result<u64, isize> {
+    let ipc = IPC.lock();
+    let port_id = ipc.resolve_cap(caller_pid, cap_handle, rights::SEND)?;
+    if !ipc.ports[port_id].in_use {
+        return Err(errno::ENOENT);
+    }
+    Ok(ipc.ports[port_id].owner_pid)
+}
+
+/// Binds a hardware peripheral IRQ `irq_num` to an EL0 port capability and unmasks it.
+pub fn irq_bind(owner_pid: u64, cap_handle: usize, irq_num: u32) -> Result<(), isize> {
+    if (irq_num as usize) >= MAX_IRQ_LINES || !proc::has_irq_cap(owner_pid, irq_num) {
+        return Err(errno::EPERM);
+    }
+    {
+        let mut ipc = IPC.lock();
+        let port_id = ipc.resolve_cap(owner_pid, cap_handle, rights::RECEIVE)?;
+        ipc.irq_ports[irq_num as usize] = Some(port_id);
+    }
+    board::irq_handle().enable_peripheral_irq(irq_num);
+    Ok(())
+}
+
+/// Called from EL1 ISR when a peripheral IRQ fires: forwards `MSG_IRQ_NOTIFY` to the bound EL0 port.
+pub fn notify_irq_from_isr(irq_num: u32) {
+    if (irq_num as usize) >= MAX_IRQ_LINES {
+        return;
+    }
+    let wake_tid = {
+        let mut ipc = IPC.lock();
+        let Some(port_id) = ipc.irq_ports[irq_num as usize] else {
+            return;
+        };
+        if !ipc.ports[port_id].in_use {
+            return;
+        }
+        let mut msg = IpcMessage::new(MSG_IRQ_NOTIFY);
+        msg.flags = irq_num;
+        let _ = ipc.ports[port_id].push_msg(msg);
+        ipc.ports[port_id].recv_waiter.take()
+    };
+    if let Some(tid) = wake_tid {
+        sched::unblock(tid);
     }
 }
 
@@ -245,7 +305,7 @@ pub fn service_register(owner_pid: u64, name: &[u8], cap_handle: usize) -> Resul
     Err(errno::ENOMEM)
 }
 
-/// Looks up a named service and grants the caller `caller_pid` a `SEND`-only capability.
+/// Looks up a named service and grants `caller_pid` a `SEND`-only capability.
 pub fn service_lookup(caller_pid: u64, name: &[u8]) -> Result<usize, isize> {
     if name.is_empty() || name.len() > 32 {
         return Err(errno::EINVAL);
@@ -272,7 +332,7 @@ pub fn port_send(
     msg.reply_port = 0;
 
     loop {
-        let wakeup_recv = {
+        let sent_and_wake = {
             let mut ipc = IPC.lock();
             let port_id = ipc.resolve_cap(sender_pid, cap_handle, rights::SEND)?;
             let port = &mut ipc.ports[port_id];
@@ -280,26 +340,19 @@ pub fn port_send(
                 return Err(errno::ENOENT);
             }
             if port.push_msg(msg) {
-                port.recv_waiter.take()
+                (true, port.recv_waiter.take())
             } else {
                 port.push_send_waiter(sender_tid);
-                None
+                sched::prepare_wait(sender_tid);
+                (false, None)
             }
         };
 
-        if let Some(recv_tid) = wakeup_recv {
+        if let Some(recv_tid) = sent_and_wake.1 {
             sched::unblock(recv_tid);
-            return Ok(());
         }
-
-        // Check whether push succeeded without a sleeping receiver.
-        {
-            let ipc = IPC.lock();
-            let port_id = ipc.resolve_cap(sender_pid, cap_handle, rights::SEND)?;
-            let still_waiting = ipc.ports[port_id].send_waiters.contains(&Some(sender_tid));
-            if !still_waiting {
-                return Ok(());
-            }
+        if sent_and_wake.0 {
+            return Ok(());
         }
 
         sched::block_current();
@@ -322,7 +375,6 @@ pub fn port_recv(
 
             if let Some(mut msg) = ipc.ports[port_id].pop_msg() {
                 let wake_sender = ipc.ports[port_id].pop_send_waiter();
-                // Convert internal reply port_id into a one-shot SEND capability for receiver.
                 if msg.reply_port != 0 {
                     let reply_port_id = (msg.reply_port - 1) as usize;
                     let reply_cap =
@@ -332,6 +384,7 @@ pub fn port_recv(
                 Ok((msg, wake_sender))
             } else {
                 ipc.ports[port_id].recv_waiter = Some(receiver_tid);
+                sched::prepare_wait(receiver_tid);
                 Err(())
             }
         };
@@ -351,8 +404,6 @@ pub fn port_recv(
 }
 
 /// Sends a synchronous request on `cap_handle` and blocks until the server replies.
-///
-/// Applies Priority Inheritance to the server port owner if caller has higher priority.
 pub fn port_call(
     caller_pid: u64,
     caller_tid: ThreadId,
@@ -368,17 +419,14 @@ pub fn port_call(
             return Err(errno::ENOENT);
         }
         let server_tid = ipc.ports[target_port_id].owner_tid;
-        let reply_port_id = ipc.alloc_port(1, caller_tid)?;
-        // Store 1-based internal port_id so `0` still denotes "no reply expected".
+        let reply_port_id = ipc.alloc_port(1, caller_pid, caller_tid)?;
         req.reply_port = (reply_port_id + 1) as u64;
         (reply_port_id, server_tid)
     };
 
-    // Priority Inheritance: boost server thread if caller holds higher effective priority.
     let caller_prio = sched::effective_priority(caller_tid).unwrap_or(Priority::NORMAL);
     sched::boost_priority(server_owner_tid, caller_prio);
 
-    // Enqueue request onto target service port.
     loop {
         let sent_and_wake = {
             let mut ipc = IPC.lock();
@@ -394,6 +442,7 @@ pub fn port_call(
                 (true, port.recv_waiter.take())
             } else {
                 port.push_send_waiter(caller_tid);
+                sched::prepare_wait(caller_tid);
                 (false, None)
             }
         };
@@ -407,7 +456,6 @@ pub fn port_call(
         sched::block_current();
     }
 
-    // Wait on the private reply port until the server calls `port_reply`.
     let reply = loop {
         let popped = {
             let mut ipc = IPC.lock();
@@ -417,6 +465,7 @@ pub fn port_call(
                 Some(msg)
             } else {
                 rport.recv_waiter = Some(caller_tid);
+                sched::prepare_wait(caller_tid);
                 None
             }
         };

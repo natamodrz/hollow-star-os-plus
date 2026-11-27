@@ -1,0 +1,14 @@
+[package]
+name = "drv-sd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Userspace (EL0) BCM2837 EMMC/SDHCI block driver server for Hollow Star OS+"
+
+[[bin]]
+name = "drv-sd"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }

@@ -2,11 +2,11 @@
 
 use core::arch::asm;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hal_core::{InterruptController, IrqSource, SerialConsole, Timer};
 
-use crate::{arch, board, sched, syscall};
+use crate::{arch, board, ipc, sched, syscall};
 
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(include_str!("vectors.S"));
@@ -17,6 +17,7 @@ unsafe extern "C" {
 
 static TIMER_TICK_MS: AtomicU64 = AtomicU64::new(10);
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Saved register state pushed onto the EL1 stack on exception entry.
 #[repr(C)]
@@ -68,6 +69,10 @@ extern "C" fn rust_irq_handler(_tf: &mut TrapFrame, _kind: u64) {
             TIMER_TICKS.fetch_add(1, Ordering::Release);
             sched::on_timer_tick(core);
         }
+        IrqSource::Peripheral(irq_num) => {
+            board::irq_handle().disable_peripheral_irq(irq_num);
+            ipc::notify_irq_from_isr(irq_num);
+        }
         IrqSource::None => {}
         other => {
             let mut console = board::emergency_console();
@@ -95,6 +100,11 @@ extern "C" fn rust_unhandled_exception_handler(tf: &mut TrapFrame, kind: u64) ->
 }
 
 fn report_fatal_exception(label: &str, tf: &TrapFrame, kind: u64) -> ! {
+    let _ = arch::save_and_disable_irqs();
+    if PANIC_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+        arch::halt();
+    }
+    let core = arch::core_id();
     let ec = (tf.esr_el1 >> 26) & 0x3F;
     let iss = tf.esr_el1 & 0x01FF_FFFF;
     let mut console = board::emergency_console();
@@ -102,7 +112,7 @@ fn report_fatal_exception(label: &str, tf: &TrapFrame, kind: u64) -> ! {
         let mut out = console.writer();
         let _ = writeln!(
             out,
-            "\nKERNEL PANIC: {label} (vector={kind}, EC={ec:#x}, ISS={iss:#x})"
+            "\nKERNEL PANIC [core {core}]: {label} (vector={kind}, EC={ec:#x}, ISS={iss:#x})"
         );
         let _ = writeln!(
             out,

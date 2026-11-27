@@ -33,6 +33,10 @@ pub const GPIO_BASE: usize = PERIPHERAL_BASE + 0x0020_0000;
 pub const PL011_UART0_BASE: usize = PERIPHERAL_BASE + 0x0020_1000;
 /// BCM2837 AUX (Mini-UART / SPI) base address.
 pub const AUX_BASE: usize = PERIPHERAL_BASE + 0x0021_5000;
+/// BCM2837 Arasan EMMC (SDHCI) controller base address.
+pub const EMMC_BASE: usize = PERIPHERAL_BASE + 0x0030_0000;
+/// BCM2837 EMMC GPU interrupt number (`IRQ2` bit `30`).
+pub const EMMC_IRQ: u32 = 62;
 
 /// Physical base of the RPi 3B / QEMU `raspi3b` firmware spin-table mailboxes (`0xD8 + 8 * core`).
 const SPIN_TABLE_BASE: usize = 0xD8;
@@ -149,6 +153,13 @@ impl Board for Raspi3bBoard {
         {
             MemoryRegion::new(AUX_BASE, PAGE_SIZE, MemoryKind::DeviceMmio)
         }
+    }
+
+    fn sd_mmio_region(&self) -> Option<(MemoryRegion, u32)> {
+        Some((
+            MemoryRegion::new(EMMC_BASE, PAGE_SIZE, MemoryKind::DeviceMmio),
+            EMMC_IRQ,
+        ))
     }
 
     fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError> {

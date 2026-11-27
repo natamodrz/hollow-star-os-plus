@@ -24,6 +24,15 @@ pub trait InterruptController {
     /// Masks/disables the per-core timer interrupt on `core_id`.
     fn disable_timer_irq(&mut self, core_id: usize);
 
+    /// Enables a shared peripheral/GPU IRQ line `irq`.
+    fn enable_peripheral_irq(&mut self, irq: u32);
+
+    /// Masks a shared peripheral/GPU IRQ line `irq`.
+    fn disable_peripheral_irq(&mut self, irq: u32);
+
+    /// Returns the lowest-numbered currently pending peripheral IRQ if any.
+    fn pending_peripheral_irq(&self) -> Option<u32>;
+
     /// Returns the highest-priority currently pending interrupt source for `core_id`.
     fn pending_irq(&self, core_id: usize) -> IrqSource;
 }

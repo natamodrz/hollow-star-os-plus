@@ -1,0 +1,15 @@
+[package]
+name = "hello-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Demo .hsapp EL0 application loaded from FAT32 SD card"
+
+[[bin]]
+name = "hello"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }

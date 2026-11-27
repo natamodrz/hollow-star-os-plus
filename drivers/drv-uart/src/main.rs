@@ -4,13 +4,13 @@
 
 //! Userspace (`EL0`) UART driver server for Hollow Star OS+.
 //!
-//! Receives [`delta_abi::MSG_UART_WRITE`] messages over its registered IPC port
-//! (`svc.uart`) and writes bytes directly to its isolated Device MMIO page.
+//! Receives [`delta_abi::MSG_UART_WRITE`] / [`delta_abi::MSG_UART_READ`] messages over
+//! its registered IPC port (`svc.uart`) using its isolated 4 KiB Device MMIO page.
 
 use core::ptr::{read_volatile, write_volatile};
 
 use libdelta::delta_abi::{
-    IpcMessage, MSG_UART_ACK, MSG_UART_WRITE, SVC_UART, UartKind, UartMmioInfo,
+    IpcMessage, MSG_UART_ACK, MSG_UART_READ, MSG_UART_WRITE, SVC_UART, UartKind, UartMmioInfo,
 };
 
 struct El0Uart {
@@ -56,6 +56,36 @@ impl El0Uart {
         }
     }
 
+    fn read_byte(&self) -> Option<u8> {
+        if self.is_mini {
+            const AUX_MU_IO: usize = 0x40;
+            const AUX_MU_LSR: usize = 0x54;
+            const LSR_DATA_READY: u32 = 1 << 0;
+            // SAFETY: Isolated 4 KiB Mini-UART page mapped into `drv-uart` `TTBR0`.
+            unsafe {
+                if (read_volatile((self.virt_base + AUX_MU_LSR) as *const u32) & LSR_DATA_READY)
+                    == 0
+                {
+                    None
+                } else {
+                    Some((read_volatile((self.virt_base + AUX_MU_IO) as *const u32) & 0xFF) as u8)
+                }
+            }
+        } else {
+            const PL011_DR: usize = 0x00;
+            const PL011_FR: usize = 0x18;
+            const FR_RXFE: u32 = 1 << 4;
+            // SAFETY: Isolated 4 KiB PL011 page mapped into `drv-uart` `TTBR0`.
+            unsafe {
+                if (read_volatile((self.virt_base + PL011_FR) as *const u32) & FR_RXFE) != 0 {
+                    None
+                } else {
+                    Some((read_volatile((self.virt_base + PL011_DR) as *const u32) & 0xFF) as u8)
+                }
+            }
+        }
+    }
+
     fn write_bytes_crlf(&self, bytes: &[u8]) {
         for &b in bytes {
             if b == b'\n' {
@@ -89,14 +119,27 @@ fn delta_main() -> usize {
             continue;
         }
 
-        if req.tag == MSG_UART_WRITE {
-            let payload = req.payload();
-            uart.write_bytes_crlf(payload);
-            if req.reply_port != 0 {
-                let mut ack = IpcMessage::new(MSG_UART_ACK);
-                ack.len = payload.len() as u32;
-                let _ = libdelta::port_reply(req.reply_port as usize, &ack);
+        match req.tag {
+            MSG_UART_WRITE => {
+                let payload = req.payload();
+                uart.write_bytes_crlf(payload);
+                if req.reply_port != 0 {
+                    let mut ack = IpcMessage::new(MSG_UART_ACK);
+                    ack.len = payload.len() as u32;
+                    let _ = libdelta::port_reply(req.reply_port as usize, &ack);
+                }
             }
+            MSG_UART_READ => {
+                let mut reply = IpcMessage::new(MSG_UART_ACK);
+                if let Some(byte) = uart.read_byte() {
+                    reply.data[0] = byte;
+                    reply.len = 1;
+                }
+                if req.reply_port != 0 {
+                    let _ = libdelta::port_reply(req.reply_port as usize, &reply);
+                }
+            }
+            _ => {}
         }
     }
 }

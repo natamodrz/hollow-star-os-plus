@@ -59,6 +59,10 @@ pub trait Board {
     /// so a userspace driver server (EL0) can be granted isolated access to it.
     fn uart_mmio_region(&self) -> MemoryRegion;
 
+    /// Returns `(mmio_region, irq_num)` for the board's SD/eMMC controller so the
+    /// userspace storage driver (`drv-sd`) can run in EL0 with IRQ forwarding.
+    fn sd_mmio_region(&self) -> Option<(MemoryRegion, u32)>;
+
     /// Wakes secondary CPU core `core_id` (`1..cpu_count`) to begin executing at
     /// physical address `entry_phys`.
     fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError>;

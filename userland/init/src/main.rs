@@ -2,32 +2,29 @@
 #![no_main]
 
 //! First EL0 userspace process (`init`) for Hollow Star OS+.
+//!
+//! Waits for core EL0 system servers (`svc.uart`, `svc.vfs`) and launches the
+//! Unix-like shell (`/BIN/shell.elf`) directly from the FAT32 SD card.
 
-use libdelta::delta_abi::{IpcMessage, MSG_UART_ACK, MSG_UART_WRITE, SVC_UART};
+use libdelta::delta_abi::{SVC_UART, SVC_VFS};
 
 #[unsafe(no_mangle)]
 fn delta_main() -> usize {
-    let uart_cap = loop {
-        if let Ok(cap) = libdelta::service_lookup(SVC_UART) {
-            break cap;
-        }
-        libdelta::yield_now();
+    let uart_cap = libdelta::wait_for_service(SVC_UART);
+    let _vfs_cap = libdelta::wait_for_service(SVC_VFS);
+
+    libdelta::print_via(
+        uart_cap,
+        "[el0/init] System servers online (svc.uart, svc.sd, svc.vfs); launching /BIN/shell.elf...\n",
+    );
+
+    let Ok(shell_pid) = libdelta::spawn_from_vfs("shell", "/BIN/shell.elf") else {
+        libdelta::print_via(
+            uart_cap,
+            "[el0/init] Failed to load /BIN/shell.elf from FAT32!\n",
+        );
+        return 1;
     };
 
-    let req = IpcMessage::from_bytes(
-        MSG_UART_WRITE,
-        b"[el0/init] Hello from EL0 userspace via Delta IPC -> drv-uart!\n",
-    );
-    let mut reply = IpcMessage::new(0);
-    if libdelta::port_call(uart_cap, &req, &mut reply).is_err() || reply.tag != MSG_UART_ACK {
-        return 1;
-    }
-
-    let confirm = IpcMessage::from_bytes(
-        MSG_UART_WRITE,
-        b"[el0/init] Synchronous IPC ACK verified; init exiting cleanly.\n",
-    );
-    let _ = libdelta::port_call(uart_cap, &confirm, &mut reply);
-
-    0
+    libdelta::wait_pid(shell_pid).unwrap_or(1)
 }

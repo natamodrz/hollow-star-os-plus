@@ -55,20 +55,24 @@
 
 ---
 
-## 4. Model IPC, Capabilities i Syscalle (M4 zaimplementowane)
+## 4. Model IPC, Capabilities, Shm, IRQ Forwarding i Syscalle (M4–M5 zaimplementowane)
 
 Komunikacja między serwerami sterowników, systemami plików i aplikacjami opiera się na **portach komunikatów** (inspirowanych portami BeOS) połączonych z **prawami dostępu (capabilities)** (inspirowanymi seL4/Mach):
 
 1. **ABI wywołań systemowych (`userland/delta-abi`, `svc #0`):**
-   - `x8` = numer wywołania (`Exit=0`, `Yield=1`, `GetPid=2`, `PortCreate=10`, `PortSend=11`, `PortRecv=12`, `PortCall=13`, `PortReply=14`, `ServiceRegister=20`, `ServiceLookup=21`, `GetUartMmioInfo=30`), `x0..x5` = argumenty, `x0` = wynik / `-errno`.
+   - `x8` = numer wywołania (`Exit=0`, `Yield=1`, `GetPid=2`, `SpawnElf=3`, `WaitPid=4`, `PortCreate=10`, `PortSend=11`, `PortRecv=12`, `PortCall=13`, `PortReply=14`, `ServiceRegister=20`, `ServiceLookup=21`, `GetUartMmioInfo=30`, `GetSdMmioInfo=31`, `IrqBind=32`, `IrqAck=33`, `ShmCreate=40`, `ShmAllowPort=41`, `ShmMap=42`, `ShmUnmap=43`), `x0..x5` = argumenty, `x0` = wynik / `-errno`.
    - Jądro bezpiecznie waliduje wskaźniki z EL0 (`copy_from_user` / `copy_to_user`) w tablicach `TTBR0_EL1` przed dostępem z EL1.
-2. **Porty, Capabilities i Priority Inheritance (`kernel/src/ipc/`):**
+2. **Porty, Capabilities, Priority Inheritance i Pamięć Współdzielona (`kernel/src/ipc/`, `kernel/src/shm.rs`):**
    - Stałe 128-bajtowe komunikaty `IpcMessage` (`tag`, `sender_pid` nadawany przez jądro, `reply_port`, `len`, `data[96]`).
    - `PortCall` tworzy jednorazowy port odpowiedzi i automatycznie przekazuje jednorazową capability `SEND` odbiorcy w `PortRecv`, podnosząc priorytet serwera (Priority Inheritance) na czas obsługi żądania.
-   - Rejestr nazw usług (`svc.uart`) wydaje klientom wyłącznie capability `SEND`.
-3. **Izolacja sterowników urządzeń w EL0 (`drivers/drv-uart`):**
-   - Wyłącznie serwer `drv-uart` otrzymuje mapowanie 4 KiB strony MMIO UART (`0x0000_1000_0000`, `Device-nGnRnE`, `PXN=1`, `UXN=1`) pozyskanej z `Board::uart_mmio_region()`. Proces `init` nie ma dostępu do MMIO i wypisuje logi wyłącznie przez IPC.
-   - Przekazywanie przerwań sprzętowych (IRQ forwarding) i współdzielone bufory pamięci dla sterowników blokowych/multimedialnych zostaną rozszerzone w M5/M6.
+   - Rejestr nazw usług (`svc.uart`, `svc.sd`, `svc.vfs`) wydaje klientom wyłącznie capability `SEND`.
+   - Obiekty pamięci współdzielonej `Shm` (`ShmCreate`, `ShmAllowPort`, `ShmMap`, `ShmUnmap`) pozwalają na transfer dużych buforów blokowych/plikowych bez zbędnego kopiowania między procesami EL0 (z ochroną stron przed wykonaniem i stronami strażniczymi).
+3. **Izolacja sterowników urządzeń w EL0 i przekazywanie przerwań (`drivers/drv-uart`, `drivers/drv-sd`):**
+   - Wyłącznie serwer `drv-uart` otrzymuje mapowanie 4 KiB strony MMIO UART (`0x0000_1000_0000`, `Device-nGnRnE`, `PXN=1`, `UXN=1`) pozyskanej z `Board::uart_mmio_region()` (obsługuje `MSG_UART_WRITE` oraz nieblokujący odczyt `MSG_UART_READ`).
+   - Wyłącznie serwer `drv-sd` otrzymuje mapowanie 4 KiB strony MMIO kontrolera Arasan EMMC (`0x0000_1000_2000`) pozyskanej z `Board::sd_mmio_region()` oraz prawo do podpięcia przerwania sprzętowego (`IrqBind` / `IrqAck`, GPU IRQ 62 na RPi 3B) dostarczanego jako `MSG_IRQ_NOTIFY`.
+4. **Serwer VFS i systemy plików (`fs/`, `vfsd`, `svc.vfs`):**
+   - Działa w EL0, czyta sektory blokowe z `svc.sd` poprzez `Shm` i montuje drzewo: `/` (**FAT32** z obsługą długich nazw VFAT LFN oraz odczytem/zapisem), `/ext2` (**ext2** tylko do odczytu z partycji 2 MBR), `/dev` (`uart0`, `sd0`) oraz `/proc` (`/proc/mounts`).
+   - Loader ELF w `userland/shell` i `userland/init` ładuje binarki `/BIN/shell.elf` oraz paczki `<App>.hsapp/exec` przez `SYS_SPAWN_ELF` / `SYS_WAIT_PID`.
 
 ---
 
@@ -83,7 +87,7 @@ Aplikacje w przestrzeni użytkownika (`apps/`) są dystrybuowane i uruchamiane j
 └── icon.png      # Ikona aplikacji wyświetlana przez launcher i eksplorator plików
 ```
 
-- **Uruchamianie (od M5/M6):** loader ELF oraz launcher systemowy rozpoznają katalogi z rozszerzeniem `.hsapp`, ładują binarkę `<AppName>.hsapp/exec` do nowej przestrzeni `TTBR0_EL1` w EL0 i udostępniają ścieżkę do `<AppName>.hsapp/Assets/` jako katalog zasobów procesu.
+- **Uruchamianie (aktywne od M5):** powłoka `shell` i loader EL0 uruchamiają `<AppName>.hsapp/exec` (zweryfikowane na `Hello.hsapp/exec` z obrazu FAT32), przekazując procesowi dostęp do zasobów paczki przez VFS (`<AppName>.hsapp/Assets/`). W M6 launcher graficzny dodatkowo wykorzysta `icon.png`.
 - **Prezentacja w UI:** eksplorator plików oraz menu startowe traktują `<AppName>.hsapp` jako pojedynczy program z ikoną `icon.png` (z możliwością podglądu zawartości paczki jako katalogu na żądanie).
 
 ---
@@ -96,5 +100,5 @@ Szczegółowy opis wszystkich kamieni milowych znajduje się w [docs/MILESTONES.
 - **M2 (Memory & Exceptions) — ukończony:** wektory wyjątków `VBAR_EL1`, ARM Generic Timer IRQ (`100 Hz`), PMM `4 KiB`, MMU `TTBR0`/`TTBR1` (wyższa połowa + W^X).
 - **M3 (Delta Scheduler & SMP) — ukończony:** przełączanie kontekstu AArch64 (`CpuContext`), wybudzenie wszystkich 4 rdzeni Cortex-A53 (`_start_secondary` + spin-table), kolejki priorytetowe `1..=120` z warstwą Real-Time i dziedziczeniem priorytetów.
 - **M4 (EL0 & IPC) — ukończony:** pełny higher-half kernel w `TTBR1_EL1`, izolowane przestrzenie `TTBR0_EL1` ładowane przez loader ELF64, ABI `svc #0`, porty IPC z capabilities i PI, proces `init` komunikujący się z serwerem `drv-uart` w EL0.
-- **M5 (Storage & VFS) — następny etap:** serwer SD/eMMC (`drv-sd`), IRQ forwarding do EL0, VFS, FAT32/ext2, ładowanie plików ELF i paczek `.hsapp` z systemu plików.
-- **M6 (Multimedia & UI):** kompozytor graficzny (Framebuffer/HDMI), potok audio wykorzystujący priorytety RT, powłoka i aplikacje.
+- **M5 (Storage & VFS) — ukończony:** pamięć współdzielona `Shm`, IRQ forwarding do EL0, serwer SD/eMMC (`drv-sd`), serwer VFS (`fs/vfsd`: MBR, FAT32 RW+LFN, ext2, `/dev`, `/proc`), `SpawnElf`/`WaitPid`, interaktywna powłoka `/BIN/shell.elf` oraz pierwsza paczka aplikacji `/Hello.hsapp/exec` ładowane z karty SD.
+- **M6 (Multimedia & UI) — następny etap:** kompozytor graficzny (Framebuffer/HDMI), potok audio wykorzystujący priorytety RT, kreator `1st Setup` (`EN`/`PL`), aplikacje `.hsapp` oraz planowana ścieżka do `v1.0.0` (poradnik instalacji na SD, automatyczne rozszerzanie partycji 2 do końca karty, własny system plików z księgowaniem).

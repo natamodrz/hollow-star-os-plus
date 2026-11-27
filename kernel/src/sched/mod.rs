@@ -55,6 +55,9 @@ struct ThreadControlBlock {
     ttbr0_root: PhysAddr,
     cpu_context: CpuContext,
     stack_base: Option<PhysAddr>,
+    wait_pending: bool,
+    on_cpu: bool,
+    pending_wakeup: bool,
 }
 
 impl ThreadControlBlock {
@@ -74,6 +77,9 @@ impl ThreadControlBlock {
             ttbr0_root: PhysAddr(0),
             cpu_context: CpuContext::empty(),
             stack_base: None,
+            wait_pending: false,
+            on_cpu: false,
+            pending_wakeup: false,
         }
     }
 }
@@ -129,6 +135,9 @@ impl SchedulerState {
             ttbr0_root: mmu::kernel_idle_ttbr0(),
             cpu_context: CpuContext::empty(),
             stack_base: None,
+            wait_pending: false,
+            on_cpu: true,
+            pending_wakeup: false,
         };
         self.idle_slot[core] = Some(slot);
         self.current_slot[core] = Some(slot);
@@ -141,7 +150,7 @@ impl SchedulerState {
         let mut best_seq = u64::MAX;
 
         for (idx, t) in self.threads.iter().enumerate() {
-            if t.state != ThreadState::Ready || t.is_idle {
+            if t.state != ThreadState::Ready || t.is_idle || t.on_cpu {
                 continue;
             }
             if t.affinity.is_some_and(|a| usize::from(a) != core) {
@@ -169,11 +178,21 @@ impl SchedulerState {
         }
         if let Some(prev_slot) = self.pending_requeue[core].take() {
             let prev = &mut self.threads[prev_slot];
+            prev.on_cpu = false;
             if prev.state == ThreadState::Running && !prev.is_idle {
+                prev.pending_wakeup = false;
                 prev.state = ThreadState::Ready;
                 prev.enqueue_seq = self.next_seq;
                 self.next_seq += 1;
+            } else if prev.state == ThreadState::Blocked && !prev.is_idle {
+                if prev.pending_wakeup {
+                    prev.pending_wakeup = false;
+                    prev.state = ThreadState::Ready;
+                    prev.enqueue_seq = self.next_seq;
+                    self.next_seq += 1;
+                }
             } else if prev.is_idle {
+                prev.pending_wakeup = false;
                 prev.state = ThreadState::Ready;
             } else if prev.state == ThreadState::Exited
                 && !prev.is_idle
@@ -295,6 +314,9 @@ fn spawn_with_space(
             ttbr0_root,
             cpu_context: CpuContext::init_thread(entry, arg, stack_top),
             stack_base: Some(stack_phys),
+            wait_pending: false,
+            on_cpu: false,
+            pending_wakeup: false,
         };
         id
     };
@@ -360,18 +382,39 @@ pub fn thread_metadata(thread_id: ThreadId) -> Option<(&'static str, Priority)> 
         .map(|t| (t.name, t.base_priority))
 }
 
-/// Blocks the calling thread until [`unblock`] wakes it.
+/// Arms `thread_id`'s wait flag under caller's wait-queue lock before [`block_current`].
+pub fn prepare_wait(thread_id: ThreadId) {
+    let mut sched = SCHED.lock();
+    for t in &mut sched.threads {
+        if t.id == thread_id.0 && t.state != ThreadState::Unused {
+            t.wait_pending = true;
+            break;
+        }
+    }
+}
+
+/// Blocks the calling thread until [`unblock`] wakes it (skipping sleep on early wakeup).
 pub fn block_current() {
     let core = usize::from(arch::core_id());
-    {
+    let should_schedule = {
         let mut sched = SCHED.lock();
         if let Some(slot) = sched.current_slot[core]
             && !sched.threads[slot].is_idle
         {
-            sched.threads[slot].state = ThreadState::Blocked;
+            if !sched.threads[slot].wait_pending {
+                false
+            } else {
+                sched.threads[slot].wait_pending = false;
+                sched.threads[slot].state = ThreadState::Blocked;
+                true
+            }
+        } else {
+            false
         }
+    };
+    if should_schedule {
+        schedule_on_core(core, false);
     }
-    schedule_on_core(core, false);
 }
 
 /// Marks a previously blocked thread as `Ready` and broadcasts a wakeup event.
@@ -380,10 +423,18 @@ pub fn unblock(thread_id: ThreadId) {
         let mut sched = SCHED.lock();
         let next_seq = sched.next_seq;
         for t in &mut sched.threads {
-            if t.id == thread_id.0 && t.state == ThreadState::Blocked {
-                t.state = ThreadState::Ready;
-                t.enqueue_seq = next_seq;
-                sched.next_seq += 1;
+            if t.id == thread_id.0 && t.state != ThreadState::Unused {
+                t.wait_pending = false;
+                if t.state == ThreadState::Blocked {
+                    if t.on_cpu {
+                        // Defer Ready transition until outgoing core finishes `switch_context`.
+                        t.pending_wakeup = true;
+                    } else {
+                        t.state = ThreadState::Ready;
+                        t.enqueue_seq = next_seq;
+                        sched.next_seq += 1;
+                    }
+                }
                 break;
             }
         }
@@ -456,6 +507,12 @@ fn schedule_on_core(core: usize, from_irq: bool) {
         if sched.pending_requeue[core].is_some() {
             None
         } else if let Some(prev_slot) = sched.current_slot[core] {
+            if sched.threads[prev_slot].state == ThreadState::Blocked
+                && sched.threads[prev_slot].pending_wakeup
+            {
+                sched.threads[prev_slot].pending_wakeup = false;
+                sched.threads[prev_slot].state = ThreadState::Running;
+            }
             let prev_is_idle = sched.threads[prev_slot].is_idle;
             let prev_state = sched.threads[prev_slot].state;
             let prev_prio = sched.threads[prev_slot].effective_priority;
@@ -493,6 +550,8 @@ fn schedule_on_core(core: usize, from_irq: bool) {
                 let next_ttbr0 = sched.threads[next_slot].ttbr0_root;
 
                 sched.threads[next_slot].state = ThreadState::Running;
+                sched.threads[next_slot].on_cpu = true;
+                sched.threads[next_slot].pending_wakeup = false;
                 sched.threads[next_slot].quantum_remaining = next_prio.default_quantum();
                 sched.current_slot[core] = Some(next_slot);
                 sched.pending_requeue[core] = Some(prev_slot);

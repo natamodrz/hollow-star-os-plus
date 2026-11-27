@@ -14,8 +14,9 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 | **M2** | Memory & Exceptions | Ukończony | Wektory wyjątków `VBAR_EL1`, ARM Generic Timer IRQ, PMM (4 KiB), MMU (`TTBR0`/`TTBR1`) |
 | **M3** | Delta Scheduler & SMP | Ukończony | Przełączanie kontekstu AArch64, wielowątkowość na 4 rdzeniach Cortex-A53, priorytety `1..=120` + RT |
 | **M4** | EL0 & IPC | Ukończony | Higher-half `TTBR1`, izolowane `TTBR0` ELF64, ABI `svc #0`, porty IPC + PI, `init` + `drv-uart` |
-| **M5** | Storage & VFS | Następny etap | Serwer SD/eMMC (`drv-sd`), IRQ forwarding, VFS w EL0, FAT32 / ext2, ładowanie ELF/`.hsapp` |
-| **M6** | Multimedia & UI | Planowany | Kompozytor Framebuffer/HDMI (`drv-fb`), audio RT (`drv-audio`), `1st Setup`, `EN/PL`, aplikacje |
+| **M5** | Storage & VFS | Ukończony | Serwer SD/eMMC (`drv-sd`), IRQ forwarding, `Shm`, VFS (`FAT32`/`ext2`), `/BIN/shell.elf` i `.hsapp` |
+| **M6** | Multimedia & UI | Następny etap | Kompozytor Framebuffer/HDMI (`drv-fb`), audio RT (`drv-audio`), `1st Setup`, `EN/PL`, aplikacje |
+| **1.0.0** | Production Release & DeltaFS | Planowany | Poradnik flashowania karty SD, auto-rozszerzanie partycji 2 do końca SD, własny journaling FS (DeltaFS), merge `testing -> main` |
 
 ---
 
@@ -63,20 +64,31 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 
 ---
 
-### M5 — Storage & VFS
+### M5 — Storage & VFS *(Ukończony)*
 - **Zakres:**
-  - Sterownik SD/eMMC w przestrzeni użytkownika (`drivers/drv-sd`, EMMC / SDHOST na RPi 3B oraz RPi Zero 2 W) komunikujący się przez IRQ forwarding i współdzielone bufory pamięci.
-  - Serwer VFS (`fs/`) z obsługą `FAT32` i `ext2`, montowaniem drzewa katalogów, `/dev` oraz `/proc`.
-  - Loader binarnych plików ELF (`userland/libdelta` + `init`) ładujący programy, serwery oraz paczki aplikacji `<AppName>.hsapp/exec` bezpośrednio z systemu plików.
-  - Rozszerzenie `libdelta` o ergonomiczny interfejs plikowy (deskryptory, ścieżki, sygnały).
-- **Kryterium akceptacji:** uruchomienie procesu powłoki (`userland/shell`) z obrazu karty SD pod QEMU `raspi3b` oraz odczyt/zapis testowego pliku na partycji FAT32.
+  - Obiekty pamięci współdzielonej `Shm` (`kernel/src/shm.rs`: `ShmCreate`, `ShmAllowPort`, `ShmMap`, `ShmUnmap`) z mapowaniem bez wykonywania kodu oraz stroną strażniczą dla bezpiecznego I/O zero-copy.
+  - Przekazywanie przerwań sprzętowych (`hal_core::InterruptController::{enable_peripheral_irq, disable_peripheral_irq}`, GPU IRQ 62 w `board-raspi3b`, syscalle `IrqBind`/`IrqAck`, zdarzenia `MSG_IRQ_NOTIFY`).
+  - Sterownik SD/eMMC w przestrzeni użytkownika (`drivers/drv-sd`, usługa `svc.sd` na BCM2837 Arasan EMMC z odizolowaną stroną MMIO `Board::sd_mmio_region()`).
+  - Serwer VFS w przestrzeni użytkownika (`fs/`, binarka `vfsd`, usługa `svc.vfs`) z obsługą tabeli partycji MBR, systemu plików **FAT32** (LFN + odczyt/zapis plików pod `/`), **ext2** (odczyt pod `/ext2`), `/dev` (`uart0`, `sd0`) oraz `/proc` (`/proc/mounts`).
+  - Dynamiczne uruchamianie procesów z VFS (`SpawnElf`, `WaitPid`), obsługa odczytu UART (`MSG_UART_READ`), interaktywna powłoka `/BIN/shell.elf` (`userland/shell`) oraz paczka `/Hello.hsapp/` (`apps/hello` -> `exec` + `Assets/` + `icon.png`) na obrazie `target/sdcard.img` generowanym przez `tools/mk_sdcard.py`.
+  - Poprawka synchronizacji SMP w `kernel/src/sched/mod.rs` (`prepare_wait`, `on_cpu`, `pending_wakeup`), eliminująca wyścig stosu przy współbieżnym `unblock`/`switch_context` podczas intensywnego IPC.
+- **Kryterium akceptacji:** zaliczone `./delta.sh ci` (`fmt`, `clippy -D warnings`, testy jednostkowe `hal-core` i `vfs-server`), uruchomienie `/BIN/shell.elf` oraz `/Hello.hsapp/exec` z obrazu SD w QEMU `raspi3b`, odczyt `/ext2/welcome.txt` i zapis/odczyt `/M5_TEST.TXT` na FAT32.
 
 ---
 
-### M6 — Multimedia & UI (Parytet UX z `FEATURES_AND_UX.md`)
+### M6 — Multimedia & UI *(Następny etap — parytet UX z `FEATURES_AND_UX.md`)*
 - **Zakres:**
   - Sterownik graficzny `drivers/drv-fb` (Mailbox Property Interface + Framebuffer HDMI/DSI/SPI) oraz kompozytor okien o ostrej retro-estetyce (brak zaokrągleń, pasek statusu, czcionka monospace).
   - Sterownik audio `drivers/drv-audio` (PWM/jack 3.5 mm / HDMI / BT na obsługiwanych wariantach) działający na priorytetach **Real-Time (`100..=120`)** planisty Delta.
   - Obsługa klawiatury/wejścia oraz obsługa płytek z `board-raspi02w` (adaptacja opcji bezprzewodowych: ukrywanie Wi-Fi/BT/FTP na wariantach bez modułu radiowego).
   - Pełna lokalizacja **`English` (domyślny) + `Polski`**, kreator **`1st Setup`** (język → Wi-Fi jeśli dostępne → czas → ekran powitalny z logo Hollow Star), uniwersalna pomoc pod **`F1`**, obsługa paczek aplikacji **`.hsapp`** (`Assets/`, `exec` ELF, `icon.png`) w launcherze oraz aplikacje z `FEATURES_AND_UX.md` (`Sys Info`, `Markdown Notes`, `File Explorer`, `MP3/Media Player`, `Calculator`, gry).
-- **Kryterium akceptacji:** pełny start graficzny z kreatorem `1st Setup` i testem odtwarzania audio bez przycięć pod obciążeniem UI w QEMU oraz na fizycznym Raspberry Pi 3B / Zero 2 W; wydanie pierwszego pełnego obrazu `.img` przez **GitHub Releases** (`gh release create`).
+- **Kryterium akceptacji:** pełny start graficzny z kreatorem `1st Setup` i testem odtwarzania audio bez przycięć pod obciążeniem UI w QEMU oraz na fizycznym Raspberry Pi 3B / Zero 2 W.
+
+---
+
+### v1.0.0 — Wydanie produkcyjne, instalator SD i własny journaling FS *(Planowany)*
+- **Zakres:**
+  - **Poradnik instalacji na kartę SD:** pełna instrukcja przygotowania karty microSD dla Raspberry Pi 3B oraz Raspberry Pi Zero 2 W (z obrazów CI w GitHub Releases).
+  - **Układ partycji na karcie SD:** **Partycja 1 (`FAT32`, boot)** pozostaje obowiązkowa ze względu na sprzętowy bootloader ROM Broadcoma (`bootcode.bin`, `start.elf`, `config.txt`, `kernel8.img`). **Partycja 2 (system / dane użytkownika / aplikacje `.hsapp`)** jest automatycznie rozszerzana do końca fizycznej karty pamięci przy pierwszym starcie (na podstawie odczytanej geometrii karty z `drv-sd`).
+  - **System plików z księgowaniem (journaling):** zaprojektowanie i wdrożenie lekkiego, własnego systemu plików **DeltaFS** (inspirowanego **BeOS BFS** — 64-bitowe B+ drzewa, atrybuty/metadane dla `.hsapp` oraz dziennik transakcji write-ahead zabezpieczający dane przed nagłym zanikiem zasilania RPi) lub ewentualnie wsparcia dla `ext4` z journalingiem.
+  - **Promocja gałęzi i publikacja:** scalenie `testing -> main`, tag `v1.0.0` oraz publikacja gotowych obrazów dla `raspi3b` i `raspi02w` poprzez GitHub Releases.

@@ -287,6 +287,45 @@ pub fn map_user_page(
     Ok(())
 }
 
+/// Unmaps a single 4 KiB page from an EL0 process's `TTBR0_EL1` table and invalidates TLB.
+pub fn unmap_user_page(user_l0: PhysAddr, va: VirtAddr) -> Option<PhysAddr> {
+    if va.as_usize() >= USER_VA_LIMIT || !va.is_page_aligned() {
+        return None;
+    }
+    let l0 = table_ref(user_l0);
+    let e0 = l0.entries[va.l0_index()];
+    if (e0 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return None;
+    }
+    let l1 = table_ref(PhysAddr((e0 & PA_MASK) as usize));
+    let e1 = l1.entries[va.l1_index()];
+    if (e1 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return None;
+    }
+    let l2 = table_ref(PhysAddr((e1 & PA_MASK) as usize));
+    let e2 = l2.entries[va.l2_index()];
+    if (e2 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return None;
+    }
+    let l3 = table_mut(PhysAddr((e2 & PA_MASK) as usize));
+    let old = l3.entries[va.l3_index()];
+    if (old & DESC_VALID) == 0 {
+        return None;
+    }
+    l3.entries[va.l3_index()] = 0;
+    // SAFETY: `tlbi vmalle1is` invalidates stale EL0 translation entries after clearing L3 PTE.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            options(nostack)
+        );
+    }
+    Some(PhysAddr((old & PA_MASK) as usize))
+}
+
 /// Resolves an EL0 virtual address inside `user_l0` and returns `(pa, is_user_writable)`.
 pub fn translate_user_page(user_l0: PhysAddr, va: VirtAddr) -> Option<(PhysAddr, bool)> {
     if va.as_usize() >= USER_VA_LIMIT {

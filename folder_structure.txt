@@ -9,24 +9,27 @@ hollow-star-os-plus/
 ├── .gitignore                # Reguły ignorowania artefaktów kompilacji, obrazów i first-prompt.txt
 ├── delta.sh                  # Główny skrypt build/check/unit/smoke/ci
 ├── run-qemu.sh               # Wrapper uruchamiający obraz w qemu-system-aarch64 (-M raspi3b)
+├── tools/
+│   └── mk_sdcard.py          # Generator testowego obrazu karty SD (MBR: FAT32 + ext2 + .hsapp)
 ├── docs/
-│   ├── architecture.md       # Specyfikacja IPC, capabilities i mikrojądra Delta
+│   ├── architecture.md       # Specyfikacja IPC, Shm, capabilities i mikrojądra Delta
 │   ├── scheduler.md          # Projekt planisty inspirowanego BeOS
-│   └── MILESTONES.md         # Szczegółowy plan i status kamieni milowych M1–M6
-├── kernel/                   # Delta Kernel (mikrojądro: boot, MMU, IPC, wątki, scheduler)
+│   └── MILESTONES.md         # Szczegółowy plan i status kamieni milowych M1–M6 oraz v1.0.0
+├── kernel/                   # Delta Kernel (mikrojądro: boot, MMU, Shm, IPC, wątki, scheduler)
 ├── hal/                      # Warstwa abstrakcji sprzętu (łatwe portowanie między SBC)
 │   ├── hal-core/             # Cechy (traits): UART, Timer, IRQ, Mem, Board, DTB parser
 │   ├── board-raspi3b/        # BCM2837 (RPi 3B - główny target rozwojowy)
 │   └── board-raspi02w/       # RP3A0 / BCM2837 (RPi Zero 2 W - przyszły target)
 ├── drivers/                  # Sterowniki jako osobne serwery w przestrzeni użytkownika
-│   ├── drv-uart/
+│   ├── drv-uart/             # Serwer UART (EL0, svc.uart)
 │   ├── drv-fb/               # Framebuffer (HDMI / DSI / SPI)
-│   ├── drv-sd/               # SD / eMMC (EMMC2 / SDHOST)
+│   ├── drv-sd/               # Sterownik SD / eMMC (EL0, svc.sd, Arasan EMMC + IRQ 62)
 │   └── drv-audio/
-├── fs/                       # VFS + sterowniki systemów plików (FAT32, ext2) w userlandzie
+├── fs/                       # Serwer VFS + systemy plików (MBR, FAT32, ext2, /dev, /proc)
 ├── userland/
-│   ├── delta-abi/            # Współdzielone numery syscalli, błędy i struktury IPC (no_std)
-│   ├── libdelta/             # Syscalle (svc #0), IPC, CRT0 _start, przyszły interfejs POSIX
-│   ├── init/                 # Pierwszy proces EL0 uruchamiający serwery systemowe
-│   └── shell/                # Interaktywna powłoka Unix-like
-└── apps/                     # Aplikacje w paczkach <App>.hsapp/ (Assets/, exec [ELF], icon.png)
+│   ├── delta-abi/            # Współdzielone numery syscalli, błędy i struktury IPC/Shm (no_std)
+│   ├── libdelta/             # Syscalle (svc #0), IPC, Shm, VFS API, CRT0 _start
+│   ├── init/                 # Pierwszy proces EL0 sprawdzający serwery i uruchamiający /BIN/shell.elf
+│   └── shell/                # Interaktywna powłoka Unix-like ładowana z FAT32
+└── apps/
+    └── hello/                # Przykładowa aplikacja paczkowana jako Hello.hsapp/ (Assets/, exec, icon.png)

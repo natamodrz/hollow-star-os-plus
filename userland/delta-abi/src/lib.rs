@@ -4,14 +4,39 @@
 
 /// Service name registered by the userspace UART driver server (`drv-uart`).
 pub const SVC_UART: &str = "svc.uart";
+/// Service name registered by the userspace SD/EMMC block driver (`drv-sd`).
+pub const SVC_SD: &str = "svc.sd";
+/// Service name registered by the userspace VFS server (`vfsd`).
+pub const SVC_VFS: &str = "svc.vfs";
 
 /// IPC message tag asking `drv-uart` to write payload bytes to the serial console.
 pub const MSG_UART_WRITE: u64 = 1;
 /// IPC reply tag acknowledging bytes written by `drv-uart`.
 pub const MSG_UART_ACK: u64 = 2;
+/// IPC tag asking `drv-uart` to read available input byte(s) without blocking.
+pub const MSG_UART_READ: u64 = 3;
+
+/// Kernel-injected IRQ forwarding notification delivered to a bound driver port.
+pub const MSG_IRQ_NOTIFY: u64 = 0x100;
+
+/// SD block driver IPC opcodes (`svc.sd`).
+pub const MSG_SD_INFO: u64 = 0x200;
+pub const MSG_SD_READ: u64 = 0x201;
+pub const MSG_SD_WRITE: u64 = 0x202;
+pub const MSG_SD_ACK: u64 = 0x2FF;
+
+/// VFS server IPC opcodes (`svc.vfs`).
+pub const MSG_VFS_READ_FILE: u64 = 0x301;
+pub const MSG_VFS_WRITE_FILE: u64 = 0x302;
+pub const MSG_VFS_READDIR: u64 = 0x303;
+pub const MSG_VFS_STAT: u64 = 0x304;
+pub const MSG_VFS_ACK: u64 = 0x3FF;
 
 /// Maximum inline payload size inside [`IpcMessage`].
 pub const IPC_MAX_DATA: usize = 96;
+
+/// Maximum VFS path bytes carried inside [`VfsPacket`].
+pub const VFS_MAX_PATH: usize = 64;
 
 /// System call numbers passed in register `x8` on AArch64 `svc #0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +45,8 @@ pub enum SyscallId {
     Exit = 0,
     Yield = 1,
     GetPid = 2,
+    SpawnElf = 3,
+    WaitPid = 4,
     PortCreate = 10,
     PortSend = 11,
     PortRecv = 12,
@@ -28,6 +55,13 @@ pub enum SyscallId {
     ServiceRegister = 20,
     ServiceLookup = 21,
     GetUartMmioInfo = 30,
+    GetSdMmioInfo = 31,
+    IrqBind = 32,
+    IrqAck = 33,
+    ShmCreate = 40,
+    ShmAllowPort = 41,
+    ShmMap = 42,
+    ShmUnmap = 43,
 }
 
 impl SyscallId {
@@ -37,6 +71,8 @@ impl SyscallId {
             0 => Some(Self::Exit),
             1 => Some(Self::Yield),
             2 => Some(Self::GetPid),
+            3 => Some(Self::SpawnElf),
+            4 => Some(Self::WaitPid),
             10 => Some(Self::PortCreate),
             11 => Some(Self::PortSend),
             12 => Some(Self::PortRecv),
@@ -45,6 +81,13 @@ impl SyscallId {
             20 => Some(Self::ServiceRegister),
             21 => Some(Self::ServiceLookup),
             30 => Some(Self::GetUartMmioInfo),
+            31 => Some(Self::GetSdMmioInfo),
+            32 => Some(Self::IrqBind),
+            33 => Some(Self::IrqAck),
+            40 => Some(Self::ShmCreate),
+            41 => Some(Self::ShmAllowPort),
+            42 => Some(Self::ShmMap),
+            43 => Some(Self::ShmUnmap),
             _ => None,
         }
     }
@@ -54,6 +97,7 @@ impl SyscallId {
 pub mod errno {
     pub const EPERM: isize = -1;
     pub const ENOENT: isize = -2;
+    pub const EIO: isize = -5;
     pub const EAGAIN: isize = -11;
     pub const ENOMEM: isize = -12;
     pub const EFAULT: isize = -14;
@@ -75,13 +119,13 @@ pub mod rights {
 pub struct IpcMessage {
     /// User-defined operation code (`MSG_*`).
     pub tag: u64,
-    /// Stamped by kernel on delivery with the sender's thread/process ID.
+    /// Stamped by kernel on delivery with the sender's process ID (`0` for kernel IRQ notify).
     pub sender_pid: u64,
     /// Kernel-supplied one-shot reply port handle for synchronous `port_call`.
     pub reply_port: u64,
     /// Valid byte count inside `data` (`0..=96`).
     pub len: u32,
-    /// Optional flags.
+    /// Optional status / flags field.
     pub flags: u32,
     /// Inline message payload.
     pub data: [u8; IPC_MAX_DATA],
@@ -135,4 +179,90 @@ pub struct UartMmioInfo {
     /// Controller type (`0` = PL011, `1` = Mini-UART).
     pub kind: u32,
     pub _pad: u32,
+}
+
+/// Device MMIO + IRQ metadata returned to the userspace SD/EMMC driver (`drv-sd`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SdMmioInfo {
+    /// Mapped EL0 virtual base address of the EMMC register page.
+    pub virt_base: usize,
+    /// Hardware GPU IRQ line number assigned to EMMC.
+    pub irq_num: u32,
+    pub _pad: u32,
+}
+
+/// Block I/O request payload packed into [`IpcMessage::data`] for `svc.sd`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SdIoPacket {
+    pub lba: u64,
+    pub shm_id: u64,
+    pub count: u32,
+    pub status: i32,
+}
+
+const _: () = assert!(core::mem::size_of::<SdIoPacket>() <= IPC_MAX_DATA);
+
+/// VFS request/reply payload packed into [`IpcMessage::data`] for `svc.vfs`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VfsPacket {
+    pub shm_id: u64,
+    pub offset: u64,
+    pub size: u32,
+    pub path_len: u16,
+    pub is_dir: u8,
+    pub _pad: u8,
+    pub status: i32,
+    pub path: [u8; VFS_MAX_PATH],
+}
+
+const _: () = assert!(core::mem::size_of::<VfsPacket>() <= IPC_MAX_DATA);
+
+impl VfsPacket {
+    /// Creates an empty [`VfsPacket`] for `path`.
+    pub fn for_path(path_bytes: &[u8]) -> Self {
+        let mut pkt = Self {
+            shm_id: 0,
+            offset: 0,
+            size: 0,
+            path_len: 0,
+            is_dir: 0,
+            _pad: 0,
+            status: 0,
+            path: [0; VFS_MAX_PATH],
+        };
+        let n = path_bytes.len().min(VFS_MAX_PATH);
+        pkt.path[..n].copy_from_slice(&path_bytes[..n]);
+        pkt.path_len = n as u16;
+        pkt
+    }
+
+    /// Returns the path slice.
+    pub fn path_bytes(&self) -> &[u8] {
+        let n = (self.path_len as usize).min(VFS_MAX_PATH);
+        &self.path[..n]
+    }
+}
+
+/// Encodes a `Copy` packet struct into an [`IpcMessage`].
+pub fn pack_msg<T: Copy>(tag: u64, pkt: &T) -> IpcMessage {
+    let mut msg = IpcMessage::new(tag);
+    let sz = core::mem::size_of::<T>().min(IPC_MAX_DATA);
+    // SAFETY: `pkt` is a valid `T` value and `sz <= IPC_MAX_DATA`.
+    let src = unsafe { core::slice::from_raw_parts((pkt as *const T).cast::<u8>(), sz) };
+    msg.data[..sz].copy_from_slice(src);
+    msg.len = sz as u32;
+    msg
+}
+
+/// Decodes a `Copy` packet struct from an [`IpcMessage`].
+pub fn unpack_msg<T: Copy>(msg: &IpcMessage) -> Option<T> {
+    let sz = core::mem::size_of::<T>();
+    if (msg.len as usize) < sz || sz > IPC_MAX_DATA {
+        return None;
+    }
+    // SAFETY: `msg.data` holds at least `sz` initialized bytes; `read_unaligned` handles alignment.
+    Some(unsafe { core::ptr::read_unaligned(msg.data.as_ptr().cast::<T>()) })
 }

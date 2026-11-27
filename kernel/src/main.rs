@@ -10,6 +10,7 @@ mod ipc;
 mod mem;
 mod proc;
 mod sched;
+mod shm;
 mod smp;
 mod sync;
 mod syscall;
@@ -22,6 +23,7 @@ use delta_abi::UartKind;
 use hal_core::{Board, BoardInfo, Dtb, InterruptController, SerialConsole, Timer, VirtAddr};
 
 use crate::mem::{HIGHER_HALF_OFFSET, KernelLayout, pmm};
+use crate::proc::DeviceCaps;
 use crate::sched::Priority;
 
 const BANNER_MAGIC: u64 = 0x4445_4C54_415F_4D32; // "DELTA_M2"
@@ -30,6 +32,8 @@ const BANNER_MAGIC: u64 = 0x4445_4C54_415F_4D32; // "DELTA_M2"
 static M2_HIGHER_HALF_PROBE: u64 = BANNER_MAGIC;
 
 static DRV_UART_ELF: &[u8] = include_bytes!(env!("DRV_UART_ELF"));
+static DRV_SD_ELF: &[u8] = include_bytes!(env!("DRV_SD_ELF"));
+static VFSD_ELF: &[u8] = include_bytes!(env!("VFSD_ELF"));
 static INIT_ELF: &[u8] = include_bytes!(env!("INIT_ELF"));
 
 static PRIO_TRACE_LEN: AtomicUsize = AtomicUsize::new(0);
@@ -179,10 +183,15 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
             sched_stats.total_threads_created,
             sched_stats.context_switches
         );
+        let _ = writeln!(
+            out,
+            "[el0]  Starting EL0 servers (drv-uart, drv-sd, vfsd, init)..."
+        );
     }
     active_board.console().flush();
 
-    // M4 Step 5: Launch EL0 userspace UART server (`drv-uart`) and `init` via ELF64 loader.
+    // Launch EL0 system servers (`drv-uart`, `drv-sd`, `vfsd`) + `init`.
+    // Only `drv-uart` and `drv-sd` receive their respective isolated 4 KiB Device MMIO pages.
     let uart_region = active_board.uart_mmio_region();
     let uart_kind = if cfg!(feature = "mini-uart") {
         UartKind::MiniUart
@@ -190,45 +199,30 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         UartKind::Pl011
     };
 
-    let drv_uart_pid = proc::spawn_elf(
+    let _drv_uart_pid = proc::spawn_elf(
         "drv-uart",
         DRV_UART_ELF,
         Priority::URGENT,
-        Some((uart_region, uart_kind)),
+        DeviceCaps {
+            uart: Some((uart_region, uart_kind)),
+            sd: None,
+        },
     )
     .expect("spawn EL0 drv-uart server");
 
-    let init_pid =
-        proc::spawn_elf("init", INIT_ELF, Priority::NORMAL, None).expect("spawn EL0 init process");
+    let sd_caps = DeviceCaps {
+        uart: None,
+        sd: active_board.sd_mmio_region(),
+    };
+    let _drv_sd_pid = proc::spawn_elf("drv-sd", DRV_SD_ELF, Priority::URGENT, sd_caps)
+        .expect("spawn EL0 drv-sd server");
 
-    let timer = board::timer_handle();
-    let el0_deadline = timer.counter().saturating_add(timer.frequency_hz() * 2);
-    loop {
-        if let Some((true, code, _)) = proc::status(init_pid) {
-            assert_eq!(code, 0, "EL0 init exited with non-zero code {code}");
-            break;
-        }
-        assert!(
-            timer.counter() < el0_deadline,
-            "Timed out waiting for EL0 init -> drv-uart IPC round-trip"
-        );
-        sched::yield_now();
-        arch::wait_for_event();
-    }
+    let _vfsd_pid = proc::spawn_elf("vfsd", VFSD_ELF, Priority::URGENT, DeviceCaps::none())
+        .expect("spawn EL0 vfsd server");
 
-    {
-        let mut out = active_board.console().writer();
-        let _ = writeln!(
-            out,
-            "[el0]  EL0 processes spawned (drv-uart pid={drv_uart_pid}, init pid={init_pid} exited=0)"
-        );
-        let _ = writeln!(
-            out,
-            "[boot] Milestone M4 (EL0 & IPC) ready. Entering idle loop."
-        );
-    }
+    let _init_pid = proc::spawn_elf("init", INIT_ELF, Priority::NORMAL, DeviceCaps::none())
+        .expect("spawn EL0 init process");
 
-    active_board.console().flush();
     loop {
         sched::yield_now();
         arch::wait_for_event();

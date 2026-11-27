@@ -20,13 +20,24 @@ fn main() {
         println!("cargo:rustc-link-arg=-T{}", linker_script.display());
     }
 
-    // Build EL0 userspace ELF binaries (`drv-uart` and `init`) into a separate target dir
-    // so Cargo never deadlocks on the outer workspace build lock.
+    // Build EL0 userspace binaries into a separate target dir so Cargo never deadlocks.
     for watched in [
         "drivers/drv-uart/src/main.rs",
         "drivers/drv-uart/Cargo.toml",
+        "drivers/drv-sd/src/main.rs",
+        "drivers/drv-sd/Cargo.toml",
+        "fs/src/lib.rs",
+        "fs/src/main.rs",
+        "fs/src/fat32.rs",
+        "fs/src/ext2.rs",
+        "fs/src/mbr.rs",
+        "fs/Cargo.toml",
         "userland/init/src/main.rs",
         "userland/init/Cargo.toml",
+        "userland/shell/src/main.rs",
+        "userland/shell/Cargo.toml",
+        "apps/hello/src/main.rs",
+        "apps/hello/Cargo.toml",
         "userland/libdelta/src/lib.rs",
         "userland/delta-abi/src/lib.rs",
         "userland/user.ld",
@@ -46,7 +57,15 @@ fn main() {
             "--package",
             "drv-uart",
             "--package",
+            "drv-sd",
+            "--package",
+            "vfs-server",
+            "--package",
             "init",
+            "--package",
+            "shell",
+            "--package",
+            "hello-app",
             "--target",
             "aarch64-unknown-none",
             "--release",
@@ -62,6 +81,14 @@ fn main() {
     println!(
         "cargo:rustc-env=DRV_UART_ELF={}",
         elf_dir.join("drv-uart").display()
+    );
+    println!(
+        "cargo:rustc-env=DRV_SD_ELF={}",
+        elf_dir.join("drv-sd").display()
+    );
+    println!(
+        "cargo:rustc-env=VFSD_ELF={}",
+        elf_dir.join("vfsd").display()
     );
     println!(
         "cargo:rustc-env=INIT_ELF={}",

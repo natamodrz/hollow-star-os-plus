@@ -38,7 +38,7 @@ jobs:
         run: ./delta.sh ci
 
       - name: Build & QEMU smoke test (release image)
-        run: PROFILE=release EXPECT_MARKER='Hollow Star OS+' ./delta.sh smoke
+        run: PROFILE=release ./delta.sh smoke
 
       - name: Package release images & checksums
         run: |
