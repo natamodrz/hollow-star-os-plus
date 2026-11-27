@@ -17,6 +17,7 @@ members = [
     "fs",
     "userland/libdelta-ui",
     "apps/hello",
+    "apps/dkex-diag",
     "apps/compositor",
     "apps/setup",
     "apps/launcher",

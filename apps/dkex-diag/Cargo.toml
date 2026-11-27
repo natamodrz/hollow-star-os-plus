@@ -1,0 +1,15 @@
+[package]
+name = "dkex-diag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Loadable .dkex Mach/OS X Kernel Extension verifying dynamic .dylib loading"
+
+[[bin]]
+name = "dkex-diag"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }

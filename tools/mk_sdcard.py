@@ -20,21 +20,34 @@ SECTORS_PER_BLOCK = DELTA_BLOCK // SECTOR_SIZE
 
 BOOT_START = 2048
 FAT32_RESERVED = 32
-FAT32_NUM_FATS = 1
-FAT32_SPC = 8
+FAT32_NUM_FATS = 2
 FAT32_ROOT_CLUSTER = 2
+
+
+def _lba_to_chs(lba: int) -> bytes:
+    """Encodes an LBA sector into an MBR CHS 3-byte tuple (255 heads, 63 sectors/track)."""
+    hpc = 255
+    spt = 63
+    c = min(1023, lba // (hpc * spt))
+    rem = lba % (hpc * spt)
+    h = rem // spt
+    s = (rem % spt) + 1
+    return bytes((h & 0xFF, ((c >> 2) & 0xC0) | (s & 0x3F), c & 0xFF))
 
 
 class Fat32Builder:
     def __init__(self, start_lba: int, total_sectors: int) -> None:
         self.start_lba = start_lba
         self.total_sectors = total_sectors
-        self.cluster_size = FAT32_SPC * SECTOR_SIZE
+        # Use 512 B/cluster when partition >= ~33 MiB so cluster count exceeds 65,525 (strict FAT32).
+        self.spc = 1 if total_sectors >= 68_000 else 8
+        self.cluster_size = self.spc * SECTOR_SIZE
         # Size FAT large enough to address every cluster in this partition.
-        est_clusters = max(256, total_sectors // FAT32_SPC)
+        est_clusters = max(256, total_sectors // self.spc)
         self.spf = max(32, math.ceil((est_clusters + 4) * 4 / SECTOR_SIZE))
         self.fat = [0x0FFFFFF8, 0x0FFFFFFF, 0x0FFFFFFF]
         self.clusters: dict[int, bytearray] = {2: bytearray(self.cluster_size)}
+        self.dir_chains: dict[int, list[int]] = {2: [2]}
         self.sfn_seq = 1
 
     def alloc_chain(self, payload: bytes) -> int:
@@ -85,21 +98,31 @@ class Fat32Builder:
         return chk
 
     def _alloc_dir_slots(self, dir_cid: int, count: int) -> tuple[bytearray, int]:
-        """Finds `count` contiguous 32-byte directory slots inside `dir_cid`."""
-        buf = self.clusters[dir_cid]
-        for off in range(0, len(buf) - (count - 1) * 32, 32):
-            if all(buf[off + k * 32] == 0 for k in range(count)):
-                return buf, off
-        raise RuntimeError("FAT32 directory full")
+        """Finds `count` contiguous 32-byte directory slots inside `dir_cid`, growing chain if full."""
+        chain = self.dir_chains.setdefault(dir_cid, [dir_cid])
+        for cid in chain:
+            buf = self.clusters[cid]
+            for off in range(0, len(buf) - (count - 1) * 32, 32):
+                if all(buf[off + k * 32] == 0 for k in range(count)):
+                    return buf, off
+        # Allocate a new cluster and link it to the tail of this directory chain.
+        new_cid = len(self.fat)
+        self.fat[chain[-1]] = new_cid
+        self.fat.append(0x0FFFFFFF)
+        new_buf = bytearray(self.cluster_size)
+        self.clusters[new_cid] = new_buf
+        chain.append(new_cid)
+        return new_buf, 0
 
     def _ensure_subdir(self, name: str) -> int:
         upper = name.upper().encode("ascii")[:8].ljust(8, b" ") + b"   "
-        root_buf = self.clusters[FAT32_ROOT_CLUSTER]
-        for off in range(0, len(root_buf), 32):
-            if root_buf[off : off + 11] == upper and (root_buf[off + 11] & 0x10) != 0:
-                hi = struct.unpack_from("<H", root_buf, off + 20)[0]
-                lo = struct.unpack_from("<H", root_buf, off + 26)[0]
-                return (hi << 16) | lo
+        for rcid in self.dir_chains.get(FAT32_ROOT_CLUSTER, [FAT32_ROOT_CLUSTER]):
+            root_buf = self.clusters[rcid]
+            for off in range(0, len(root_buf), 32):
+                if root_buf[off : off + 11] == upper and (root_buf[off + 11] & 0x10) != 0:
+                    hi = struct.unpack_from("<H", root_buf, off + 20)[0]
+                    lo = struct.unpack_from("<H", root_buf, off + 26)[0]
+                    return (hi << 16) | lo
         # Allocate 1 empty cluster for the subdirectory with `.` and `..`.
         sub_cid = len(self.fat)
         self.fat.append(0x0FFFFFFF)
@@ -111,6 +134,7 @@ class Fat32Builder:
         sub_buf[32:43] = b"..         "
         sub_buf[43] = 0x10
         self.clusters[sub_cid] = sub_buf
+        self.dir_chains[sub_cid] = [sub_cid]
 
         rbuf, off = self._alloc_dir_slots(FAT32_ROOT_CLUSTER, 1)
         rbuf[off : off + 11] = upper
@@ -178,7 +202,7 @@ class Fat32Builder:
         bpb[0:3] = b"\xEB\x58\x90"
         bpb[3:11] = b"DELTAOS "
         struct.pack_into("<H", bpb, 11, SECTOR_SIZE)
-        bpb[13] = FAT32_SPC
+        bpb[13] = self.spc
         struct.pack_into("<H", bpb, 14, FAT32_RESERVED)
         bpb[16] = FAT32_NUM_FATS
         bpb[21] = 0xF8  # Media descriptor: fixed/removable disk
@@ -207,17 +231,18 @@ class Fat32Builder:
         struct.pack_into("<I", fsinfo, 0, 0x41615252)
         struct.pack_into("<I", fsinfo, 484, 0x61417272)
         data_sectors = self.total_sectors - FAT32_RESERVED - FAT32_NUM_FATS * self.spf
-        free_clusters = max(0, (data_sectors // FAT32_SPC) - (len(self.fat) - 2))
+        free_clusters = max(0, (data_sectors // self.spc) - (len(self.fat) - 2))
         struct.pack_into("<I", fsinfo, 488, free_clusters)
         struct.pack_into("<I", fsinfo, 492, len(self.fat))
         struct.pack_into("<I", fsinfo, 508, 0xAA550000)
         img[p_off + SECTOR_SIZE : p_off + 2 * SECTOR_SIZE] = fsinfo
 
-        fat_off = p_off + FAT32_RESERVED * SECTOR_SIZE
-        for idx, val in enumerate(self.fat):
-            struct.pack_into("<I", img, fat_off + idx * 4, val)
+        for fat_copy in range(FAT32_NUM_FATS):
+            fat_off = p_off + (FAT32_RESERVED + fat_copy * self.spf) * SECTOR_SIZE
+            for idx, val in enumerate(self.fat):
+                struct.pack_into("<I", img, fat_off + idx * 4, val)
 
-        data_off = fat_off + FAT32_NUM_FATS * self.spf * SECTOR_SIZE
+        data_off = p_off + (FAT32_RESERVED + FAT32_NUM_FATS * self.spf) * SECTOR_SIZE
         for cid, cbuf in self.clusters.items():
             off = data_off + (cid - 2) * self.cluster_size
             img[off : off + len(cbuf)] = cbuf
@@ -375,6 +400,29 @@ def _add_hsapp(
     sysfs.add_file(bdir, "exec", exec_bytes, b"application/x-elf")
 
 
+def _add_dkex(
+    sysfs: DeltaFsBuilder,
+    ext_dir: int,
+    bundle_name: str,
+    bundle_id: str,
+    service_name: str,
+    priority: int,
+    exec_bytes: bytes | None,
+) -> None:
+    bdir = sysfs.mkdir(ext_dir, bundle_name, is_hsapp=True)
+    plist = (
+        f'<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<plist version="1.0"><dict>\n'
+        f"  <key>CFBundleIdentifier</key><string>{bundle_id}</string>\n"
+        f"  <key>DeltaService</key><string>{service_name}</string>\n"
+        f"  <key>DeltaPriority</key><string>{priority}</string>\n"
+        f"</dict></plist>\n"
+    ).encode("utf-8")
+    sysfs.add_file(bdir, "Info.plist", plist, b"application/xml")
+    if exec_bytes is not None:
+        sysfs.add_file(bdir, "exec", exec_bytes, b"application/x-elf")
+
+
 def build_image(
     userland_dir: Path,
     out_path: Path,
@@ -394,6 +442,8 @@ def build_image(
         "terminal": userland_dir / "terminal",
         "hollow-star": userland_dir / "hollow-star",
         "hello": userland_dir / "hello",
+        "dkex-diag": userland_dir / "dkex-diag",
+        "libdelta_kit": userland_dir / "libdelta_kit.dylib",
     }
     for name, p in required.items():
         if not p.exists():
@@ -422,13 +472,20 @@ def build_image(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img = bytearray(disk_sectors * SECTOR_SIZE)
 
-    # MBR: Part 1 (/boot FAT32 0x0C), Part 2 (/system DeltaFS 0xDF), Part 3 (/user DeltaFS 0xDF)
+    # MBR: Part 1 (/boot FAT32 0x0C active), Part 2 (/system DeltaFS 0xDF), Part 3 (/user DeltaFS 0xDF)
     img[510:512] = b"\x55\xAA"
+    img[446] = 0x80
+    img[446 + 1 : 446 + 4] = _lba_to_chs(BOOT_START)
     img[446 + 4] = 0x0C
+    img[446 + 5 : 446 + 8] = _lba_to_chs(BOOT_START + boot_sectors - 1)
     struct.pack_into("<II", img, 446 + 8, BOOT_START, boot_sectors)
+    img[462 + 1 : 462 + 4] = _lba_to_chs(system_start)
     img[462 + 4] = 0xDF
+    img[462 + 5 : 462 + 8] = _lba_to_chs(system_start + system_sectors - 1)
     struct.pack_into("<II", img, 462 + 8, system_start, system_sectors)
+    img[478 + 1 : 478 + 4] = _lba_to_chs(user_start)
     img[478 + 4] = 0xDF
+    img[478 + 5 : 478 + 8] = _lba_to_chs(user_start + user_sectors - 1)
     struct.pack_into("<II", img, 478 + 8, user_start, user_sectors)
 
     # 1. /boot (FAT32 / VFAT)
@@ -449,6 +506,39 @@ def build_image(
     sys_bin = sysfs.mkdir(sysfs.root_inode, "bin")
     sysfs.add_file(sys_bin, "shell.elf", bins["shell"], b"application/x-elf")
     sysfs.add_file(sys_bin, "compositor.elf", bins["compositor"], b"application/x-elf")
+
+    sys_lib = sysfs.mkdir(sysfs.root_inode, "lib")
+    sysfs.add_file(sys_lib, "libdelta_kit.dylib", bins["libdelta_kit"], b"application/x-dylib")
+
+    sys_library = sysfs.mkdir(sysfs.root_inode, "Library")
+    sys_ext = sysfs.mkdir(sys_library, "Extensions")
+    _add_dkex(
+        sysfs,
+        sys_ext,
+        "DeltaDiag.dkex",
+        "com.hollowstar.dkex.diag",
+        "svc.diag",
+        10,
+        bins["dkex-diag"],
+    )
+    for bname, bid, svc, prio, bin_file in (
+        ("DeltaUart.dkex", "com.hollowstar.dkex.uart", "svc.uart", 20, "drv-uart"),
+        ("DeltaSD.dkex", "com.hollowstar.dkex.sd", "svc.sd", 20, "drv-sd"),
+        ("DeltaVFS.dkex", "com.hollowstar.dkex.vfs", "svc.vfs", 20, "vfsd"),
+        ("DeltaFB.dkex", "com.hollowstar.dkex.fb", "svc.fb", 15, "drv-fb"),
+        ("DeltaAudio.dkex", "com.hollowstar.dkex.audio", "svc.audio", 110, "drv-audio"),
+        ("DeltaKbd.dkex", "com.hollowstar.dkex.kbd", "svc.kbd", 20, "drv-kbd"),
+    ):
+        bpath = userland_dir / bin_file
+        _add_dkex(
+            sysfs,
+            sys_ext,
+            bname,
+            bid,
+            svc,
+            prio,
+            bpath.read_bytes() if bpath.exists() else None,
+        )
 
     sys_apps = sysfs.mkdir(sysfs.root_inode, "apps")
     _add_hsapp(

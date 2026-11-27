@@ -60,8 +60,8 @@
 Komunikacja między serwerami sterowników, systemami plików i aplikacjami opiera się na **portach komunikatów** (inspirowanych portami BeOS) połączonych z **prawami dostępu (capabilities)** (inspirowanymi seL4/Mach):
 
 1. **ABI wywołań systemowych (`userland/delta-abi`, `svc #0`):**
-   - `x8` = numer wywołania (`Exit=0`, `Yield=1`, `GetPid=2`, `SpawnElf=3`, `WaitPid=4`, `GetSysCaps=5`, `PortCreate=10`, `PortSend=11`, `PortRecv=12`, `PortCall=13`, `PortReply=14`, `ServiceRegister=20`, `ServiceLookup=21`, `GetUartMmioInfo=30`, `GetSdMmioInfo=31`, `IrqBind=32`, `IrqAck=33`, `GetFbMmioInfo=34`, `MapFbPhys=35`, `AllocDmaPage=36`, `GetAudioMmioInfo=37`, `GetUsbMmioInfo=38`, `ShmCreate=40`, `ShmAllowPort=41`, `ShmMap=42`, `ShmUnmap=43`), `x0..x5` = argumenty, `x0` = wynik / `-errno`.
-   - Jądro bezpiecznie waliduje wskaźniki z EL0 (`copy_from_user` / `copy_to_user`) w tablicach `TTBR0_EL1` przed dostępem z EL1.
+   - `x8` = numer wywołania (`Exit=0`, `Yield=1`, `GetPid=2`, `SpawnElf=3`, `WaitPid=4`, `GetSysCaps=5`, `PortCreate=10`, `PortSend=11`, `PortRecv=12`, `PortCall=13`, `PortReply=14`, `ServiceRegister=20`, `ServiceLookup=21`, `GetUartMmioInfo=30`, `GetSdMmioInfo=31`, `IrqBind=32`, `IrqAck=33`, `GetFbMmioInfo=34`, `MapFbPhys=35`, `AllocDmaPage=36`, `GetAudioMmioInfo=37`, `GetUsbMmioInfo=38`, `ShmCreate=40`, `ShmAllowPort=41`, `ShmMap=42`, `ShmUnmap=43`, `VmAllocate=50`, `VmProtect=51`), `x0..x5` = argumenty, `x0` = wynik / `-errno`.
+   - Jądro bezpiecznie waliduje wskaźniki z EL0 (`copy_from_user` / `copy_to_user`) w tablicach `TTBR0_EL1` przed dostępem z EL1 oraz egzekwuje politykę W^X przy dynamicznym przełączaniu ochrony stron (`VmProtect` dla `dyld`).
 2. **Porty, Capabilities, Priority Inheritance i Pamięć Współdzielona (`kernel/src/ipc/`, `kernel/src/shm.rs`):**
    - Stałe 128-bajtowe komunikaty `IpcMessage` (`tag`, `sender_pid` nadawany przez jądro, `reply_port`, `len`, `data[96]`).
    - `PortCall` tworzy jednorazowy port odpowiedzi i automatycznie przekazuje jednorazową capability `SEND` odbiorcy w `PortRecv`, podnosząc priorytet serwera (Priority Inheritance) na czas obsługi żądania.
@@ -75,7 +75,7 @@ Komunikacja między serwerami sterowników, systemami plików i aplikacjami opie
    - `drv-kbd` otrzymuje wielostronicowe okno MMIO kontrolera Synopsys DWC2 USB Host (`Board::usb_mmio_region()`) oraz stronę DMA (`NormalNc`), obsługując klawiatury USB HID Boot bezpośrednio (QEMU `-device usb-kbd`, RPi Zero 2 W OTG) i przez hub USB (np. LAN9514 na Raspberry Pi 3B).
 4. **Serwer VFS i separacja 3 partycji (`fs/`, `vfsd`, `svc.vfs`):**
    - Partycja 1 (`0x0C` **FAT32/VFAT**) -> **`/boot`** (pliki startowe RPi: `bootcode.bin`, `start.elf`, `fixup.dat`, DTBs z długimi nazwami LFN, `config.txt`, `kernel8.img`).
-   - Partycja 2 (`0xDF` **DeltaFS**, `ROLE_SYSTEM`) -> **`/system`** (`/system/bin/shell.elf`, `/system/bin/compositor.elf`, `/system/apps/{Setup,Launcher,Terminal,Apps,Hello}.hsapp/`).
+   - Partycja 2 (`0xDF` **DeltaFS**, `ROLE_SYSTEM`) -> **`/system`** (`/system/bin/{shell,compositor}.elf`, `/system/lib/libdelta_kit.dylib`, `/system/Library/Extensions/*.dkex/` (`Info.plist` + `exec`), `/system/apps/{Setup,Launcher,Terminal,Apps,Hello}.hsapp/`).
    - Partycja 3 (`0xDF` **DeltaFS**, `ROLE_USER`) -> **`/user`** (`/user/config/os.cfg`, `/user/notes/`, `/user/media/`, `/user/apps/`), z dziennikowaniem write-ahead log (**WAL**) oraz możliwością dynamicznego rozszerzania partycji do końca karty SD (`MSG_VFS_EXPAND_USER`).
    - Przestrzenie wirtualne `/dev` (`uart0`, `sd0`, `fb0`, `audio0`) oraz `/proc` (`/proc/version`, `/proc/mounts`, `/proc/partitions`).
 
@@ -84,10 +84,11 @@ Komunikacja między serwerami sterowników, systemami plików i aplikacjami opie
 ## 5. Modularny Kompozytor Desktop (`svc.desktop`) i format paczek `.hsapp`
 
 Zgodnie z architekturą mikrojądrową, warstwa graficzna została rozdzielona na niezależne procesy EL0 komunikujące się przez wspólną bibliotekę `userland/libdelta-ui` (czcionka proporcjonalna w stylu **Calibri** z polskimi znakami oraz czcionka **Monospace `8x14`** dla terminala) i protokół `svc.desktop`:
-- **Kompozytor (`apps/compositor` -> `/system/bin/compositor.elf`):** zarządza `svc.fb`, mapuje powierzchnię `Shm` `640x452` aktywnej aplikacji `.hsapp`, rysuje górny pasek statusu (`28px`), przechwytuje klawisze z USB HID (`svc.kbd`) i serial UART (`svc.uart`), obsługuje globalną nakładkę pomocy `F1` i przełącza aplikacje.
+- **Kompozytor (`apps/compositor` -> `/system/bin/compositor.elf`):** zarządza `svc.fb`, mapuje powierzchnię `Shm` `640x452` aktywnej aplikacji `.hsapp`, rysuje górny pasek statusu (`28px` + `CYBERDECK`), obsługuje klawiaturę USB HID (`svc.kbd`, bez interaktywnej powłoki UART), globalną nakładkę pomocy `F1` z efektem blur oraz animacje przejść.
 - **`1st Setup` (`apps/setup` -> `/system/apps/Setup.hsapp/`):** osobny kreator startowy (`EN`/`PL` → zegar → podsumowanie sprzętu).
-- **App Launcher (`apps/launcher` -> `/system/apps/Launcher.hsapp/`):** osobna siatka `.hsapp` uruchamiająca poszczególne pakiety w izolowanych przestrzeniach `TTBR0`.
-- **Terminal Emulator (`apps/terminal` -> `/system/apps/Terminal.hsapp/`):** okienkowy emulator terminala z czcionką `8x14` monospace, historią poleceń i pełnym dostępem do komend VFS (`ls`, `cat`, `write`, `df`, `sysinfo`, `expand`, `run`, `exit`).
+- **App Launcher (`apps/launcher` -> `/system/apps/Launcher.hsapp/`):** pełnoekranowy launcher Cyberdeck / DIY PDA z telemetrią Mach/OSX (`.dkex` + `.dylib`).
+- **Terminal Emulator (`apps/terminal` -> `/system/apps/Terminal.hsapp/`):** okienkowy emulator terminala z czcionką `8x14` monospace, historią poleceń i komendami VFS/Mach (`ls`, `cat`, `write`, `df`, `sysinfo`, `dkexstat`, `dylibs`, `expand`, `run`, `exit`).
+- **Rozszerzenia `.dkex` i biblioteki `.dylib` (inspirowane OS X / Mach):** rozszerzenia sterowników w `/system/Library/Extensions/<Nazwa>.dkex/` (`Info.plist` + `exec`, w tym dynamicznie ładowany z DeltaFS `DeltaDiag.dkex`) oraz współdzielone obiekty `ET_DYN` ELF64 w `/system/lib/libdelta_kit.dylib` ładowane dynamicznie w EL0 przez `libdelta::dyld::Dylib` (`VmAllocate` + relokacje `R_AARCH64_RELATIVE` + `VmProtect` W^X).
 - **Zestaw Narzędzi (`apps/hollow-star` -> `/system/apps/Apps.hsapp/`):** `Sys Info`, `Markdown Notes`, `File Explorer`, `Media Player RT`, `Calculator`, `Games`, `Settings`.
 
 Paczki aplikacji zachowują strukturę katalogową inspirowaną macOS:

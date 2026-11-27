@@ -55,7 +55,8 @@ build_sdcard_img() {
     if [ -f "$userland_dir/shell" ] && [ -f "$userland_dir/compositor" ] \
        && [ -f "$userland_dir/setup" ] && [ -f "$userland_dir/launcher" ] \
        && [ -f "$userland_dir/terminal" ] && [ -f "$userland_dir/hollow-star" ] \
-       && [ -f "$userland_dir/hello" ]; then
+       && [ -f "$userland_dir/hello" ] && [ -f "$userland_dir/dkex-diag" ] \
+       && [ -f "$userland_dir/libdelta_kit.dylib" ]; then
       info "Tworzenie obrazu karty SD ($SD_IMG: /boot FAT32 + /system DeltaFS + /user DeltaFS + .hsapp)..."
       python3 tools/mk_sdcard.py "$userland_dir" "$SD_IMG"
     fi

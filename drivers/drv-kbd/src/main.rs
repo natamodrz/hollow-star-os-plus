@@ -131,7 +131,8 @@ struct Dwc2Host {
     kbd: Option<UsbTarget>,
     prev_report: [u8; 8],
     repeat_key: u8,
-    repeat_ticks: u16,
+    repeat_start_ms: u64,
+    last_repeat_ms: u64,
 }
 
 impl Dwc2Host {
@@ -144,8 +145,13 @@ impl Dwc2Host {
             kbd: None,
             prev_report: [0; 8],
             repeat_key: 0,
-            repeat_ticks: 0,
+            repeat_start_ms: 0,
+            last_repeat_ms: 0,
         }
+    }
+
+    fn now_ms() -> u64 {
+        libdelta::sys_caps().map(|c| c.uptime_ms).unwrap_or(0)
     }
 
     #[inline]
@@ -811,10 +817,13 @@ impl Dwc2Host {
                 self.kbd = Some(target);
             }
             Err(_) => {
-                // Repeat held navigation key smoothly after initial hold threshold.
+                // Repeat held navigation key smoothly using real uptime_ms timing (420ms delay, 95ms rate).
                 if self.repeat_key != 0 {
-                    self.repeat_ticks += 1;
-                    if self.repeat_ticks >= 32 && self.repeat_ticks.is_multiple_of(6) {
+                    let t = Self::now_ms();
+                    if t.saturating_sub(self.repeat_start_ms) >= 420
+                        && t.saturating_sub(self.last_repeat_ms) >= 95
+                    {
+                        self.last_repeat_ms = t;
                         emit_hid_usage(self.repeat_key, self.prev_report[0], queue);
                     }
                 }
@@ -838,7 +847,9 @@ impl Dwc2Host {
         }
         if active_nav != self.repeat_key {
             self.repeat_key = active_nav;
-            self.repeat_ticks = 0;
+            let t = Self::now_ms();
+            self.repeat_start_ms = t;
+            self.last_repeat_ms = t;
         }
     }
 }

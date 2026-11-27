@@ -6,6 +6,7 @@ use core::ptr::copy_nonoverlapping;
 
 use delta_abi::{
     AudioMmioInfo, DmaPageInfo, FbMmioInfo, SdMmioInfo, UartKind, UartMmioInfo, UsbMmioInfo, errno,
+    vm_prot,
 };
 use hal_core::{MemoryRegion, PAGE_SIZE, PhysAddr, VirtAddr, mem::align_down, mem::align_up};
 
@@ -27,6 +28,10 @@ const USER_USB_MMIO_VA: usize = 0x0000_1004_0000;
 const USER_DMA_BASE_VA: usize = 0x0000_1800_0000;
 /// Starting virtual base for dynamic per-process shared memory (`Shm`) mappings.
 const USER_SHM_BASE_VA: usize = 0x0000_2000_0000;
+/// Starting virtual base for Mach-like dynamic allocations (`VmAllocate` / `.dylib` `dyld`).
+const USER_VM_BASE_VA: usize = 0x0000_2800_0000;
+const USER_VM_LIMIT_VA: usize = 0x0000_2FFF_0000;
+const MAX_VM_ALLOC_PAGES: usize = 128;
 /// Fixed virtual base where `drv-fb` maps the physical VideoCore framebuffer aperture.
 const USER_FB_PHYS_VA: usize = 0x0000_3000_0000;
 const MAX_FB_MAP_BYTES: usize = 8 * 1024 * 1024;
@@ -62,6 +67,7 @@ struct ProcessControlBlock {
     user_sp: usize,
     next_shm_va: usize,
     next_dma_va: usize,
+    next_vm_va: usize,
     uart_mmio: Option<UartMmioInfo>,
     sd_mmio: Option<SdMmioInfo>,
     fb_mmio: Option<FbMmioInfo>,
@@ -82,6 +88,7 @@ impl ProcessControlBlock {
             user_sp: 0,
             next_shm_va: USER_SHM_BASE_VA,
             next_dma_va: USER_DMA_BASE_VA,
+            next_vm_va: USER_VM_BASE_VA,
             uart_mmio: None,
             sd_mmio: None,
             fb_mmio: None,
@@ -213,6 +220,7 @@ pub fn spawn_elf(
             user_sp: loaded.user_sp,
             next_shm_va: USER_SHM_BASE_VA,
             next_dma_va: USER_DMA_BASE_VA,
+            next_vm_va: USER_VM_BASE_VA,
             uart_mmio,
             sd_mmio,
             fb_mmio,
@@ -382,6 +390,93 @@ pub fn audio_mmio_info(pid: u64) -> Option<AudioMmioInfo> {
 pub fn usb_mmio_info(pid: u64) -> Option<UsbMmioInfo> {
     let table = PROCS.lock();
     table.find_by_pid(pid).and_then(|p| p.usb_mmio)
+}
+
+/// Mach-style `vm_allocate`: maps `num_pages` contiguous zeroed `RW` 4 KiB pages into `pid`'s `TTBR0`.
+pub fn vm_allocate(pid: u64, ttbr0_root: PhysAddr, num_pages: usize) -> Result<usize, isize> {
+    if num_pages == 0 || num_pages > MAX_VM_ALLOC_PAGES {
+        return Err(errno::EINVAL);
+    }
+    let base_va = {
+        let mut table = PROCS.lock();
+        let p = table.find_by_pid_mut(pid).ok_or(errno::ENOENT)?;
+        let va = p.next_vm_va;
+        let next = va
+            .checked_add((num_pages + 1) * PAGE_SIZE)
+            .ok_or(errno::ENOMEM)?;
+        if next > USER_VM_LIMIT_VA {
+            return Err(errno::ENOMEM);
+        }
+        p.next_vm_va = next;
+        va
+    };
+
+    for i in 0..num_pages {
+        let Some(pa) = pmm::alloc_zeroed_frame() else {
+            for rollback in 0..i {
+                if let Some(old_pa) =
+                    mmu::unmap_user_page(ttbr0_root, VirtAddr(base_va + rollback * PAGE_SIZE))
+                {
+                    let _ = pmm::free_frame(old_pa);
+                }
+            }
+            return Err(errno::ENOMEM);
+        };
+        if mmu::map_user_page(
+            ttbr0_root,
+            VirtAddr(base_va + i * PAGE_SIZE),
+            pa,
+            UserPageAttrs::RwData,
+        )
+        .is_err()
+        {
+            let _ = pmm::free_frame(pa);
+            for rollback in 0..i {
+                if let Some(old_pa) =
+                    mmu::unmap_user_page(ttbr0_root, VirtAddr(base_va + rollback * PAGE_SIZE))
+                {
+                    let _ = pmm::free_frame(old_pa);
+                }
+            }
+            return Err(errno::ENOMEM);
+        }
+    }
+    Ok(base_va)
+}
+
+/// Mach-style `vm_protect`: transitions `num_pages` inside `USER_VM_BASE_VA..` with strict W^X (`RX`, `RO`, `RW`).
+pub fn vm_protect(
+    pid: u64,
+    ttbr0_root: PhysAddr,
+    va: usize,
+    num_pages: usize,
+    prot: usize,
+) -> Result<(), isize> {
+    if num_pages == 0 || num_pages > MAX_VM_ALLOC_PAGES || !va.is_multiple_of(PAGE_SIZE) {
+        return Err(errno::EINVAL);
+    }
+    if (prot & vm_prot::WRITE) != 0 && (prot & vm_prot::EXEC) != 0 {
+        return Err(errno::EPERM);
+    }
+    let attrs = match prot {
+        vm_prot::RO => UserPageAttrs::RoData,
+        vm_prot::RW => UserPageAttrs::RwData,
+        vm_prot::RX => UserPageAttrs::Code,
+        _ => return Err(errno::EINVAL),
+    };
+    let end_va = va.checked_add(num_pages * PAGE_SIZE).ok_or(errno::EINVAL)?;
+    {
+        let table = PROCS.lock();
+        let p = table.find_by_pid(pid).ok_or(errno::ENOENT)?;
+        if va < USER_VM_BASE_VA || end_va > p.next_vm_va {
+            return Err(errno::EPERM);
+        }
+    }
+    for i in 0..num_pages {
+        mmu::protect_user_page(ttbr0_root, VirtAddr(va + i * PAGE_SIZE), attrs)
+            .map_err(|_| errno::EFAULT)?;
+    }
+    Ok(())
 }
 
 /// Allocates one non-cacheable DMA 4 KiB page for an authorized driver server.

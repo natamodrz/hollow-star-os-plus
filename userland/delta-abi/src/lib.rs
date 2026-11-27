@@ -107,6 +107,10 @@ pub enum SyscallId {
     ShmAllowPort = 41,
     ShmMap = 42,
     ShmUnmap = 43,
+    /// Mach-like dynamic virtual page allocator (`mach_vm_allocate`): `x0 = num_pages`.
+    VmAllocate = 50,
+    /// Mach-like W^X page protection updater (`mach_vm_protect`): `x0 = va, x1 = pages, x2 = vm_prot`.
+    VmProtect = 51,
 }
 
 impl SyscallId {
@@ -139,9 +143,21 @@ impl SyscallId {
             41 => Some(Self::ShmAllowPort),
             42 => Some(Self::ShmMap),
             43 => Some(Self::ShmUnmap),
+            50 => Some(Self::VmAllocate),
+            51 => Some(Self::VmProtect),
             _ => None,
         }
     }
+}
+
+/// Page protection bitflags for [`SyscallId::VmProtect`] (W^X enforced: WRITE | EXEC is invalid).
+pub mod vm_prot {
+    pub const READ: usize = 1 << 0;
+    pub const WRITE: usize = 1 << 1;
+    pub const EXEC: usize = 1 << 2;
+    pub const RO: usize = READ;
+    pub const RW: usize = READ | WRITE;
+    pub const RX: usize = READ | EXEC;
 }
 
 /// Negative POSIX-aligned error codes returned in `x0`.

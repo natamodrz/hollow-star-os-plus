@@ -4,6 +4,7 @@
 //! Userspace runtime, IPC, shared memory, and VFS/process helpers (`EL0`) for Hollow Star OS+.
 
 pub use delta_abi;
+pub mod dyld;
 
 use core::arch::asm;
 #[cfg(target_os = "none")]
@@ -338,6 +339,21 @@ pub fn shm_map(shm_id: u64) -> Result<(usize, usize), isize> {
 /// Unmaps and releases a shared memory mapping from this process.
 pub fn shm_unmap(shm_id: u64) -> Result<(), isize> {
     to_result(syscall4(SyscallId::ShmUnmap, shm_id as usize, 0, 0, 0)).map(|_| ())
+}
+
+/// Allocates `num_pages` contiguous zeroed `RW` 4 KiB pages (`VmAllocate` / Mach `vm_allocate`).
+pub fn vm_allocate(num_pages: usize) -> Result<usize, isize> {
+    to_result(syscall4(SyscallId::VmAllocate, num_pages, 0, 0, 0))
+}
+
+/// Changes W^X page permissions (`delta_abi::vm_prot`) on a `VmAllocate` range (`VmProtect`).
+pub fn vm_protect(va: usize, num_pages: usize, prot: usize) -> Result<(), isize> {
+    to_result(syscall4(SyscallId::VmProtect, va, num_pages, prot, 0)).map(|_| ())
+}
+
+/// Returns current kernel uptime in milliseconds (`CNTPCT_EL0` 1 ms resolution).
+pub fn uptime_ms() -> u64 {
+    sys_caps().map(|c| c.uptime_ms).unwrap_or(0)
 }
 
 /// Convenience helper: prints text to the userspace UART server (`svc.uart`).

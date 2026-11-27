@@ -3,16 +3,16 @@
 /// Fixed-point `1.0` scale (`Q16.16` normalized parameter `0..=65536`).
 pub const Q16_ONE: u32 = 65_536;
 
-/// Corner shape combining rounded arcs and sharp pointed cusps (Hollow Star logo style).
+/// Corner geometry for UI panels, tiles, and badges (subtle convex rounding or crisp 90° corners).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CornerStyle {
-    /// Smoothly rounded convex outer arc of `radius` pixels.
+    /// Smooth subtle convex outer rounding of `radius` pixels (no inward bites).
     Rounded(u16),
-    /// Concave inward arc terminating at a sharp pointed vertex (`depth` pixels).
-    SharpCusp(u16),
+    /// Crisp 90-degree sharp corner for technical badges and structural panels.
+    Sharp,
 }
 
-/// Asymmetric 4-corner descriptor for cyberdeck cards, panels, and pills.
+/// 4-corner descriptor for cyberdeck cards, panels, and pills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArcSharpStyle {
     pub top_left: CornerStyle,
@@ -22,33 +22,43 @@ pub struct ArcSharpStyle {
 }
 
 impl ArcSharpStyle {
-    /// Balanced card style: sharp-cusp top-left/bottom-right opposing rounded arcs.
+    /// Clean, lightly rounded card container (`radius = 6`).
     pub const fn cyberdeck_card() -> Self {
         Self {
-            top_left: CornerStyle::SharpCusp(9),
-            top_right: CornerStyle::Rounded(11),
-            bottom_right: CornerStyle::SharpCusp(9),
-            bottom_left: CornerStyle::Rounded(11),
+            top_left: CornerStyle::Rounded(6),
+            top_right: CornerStyle::Rounded(6),
+            bottom_right: CornerStyle::Rounded(6),
+            bottom_left: CornerStyle::Rounded(6),
         }
     }
 
-    /// Compact pill / tile style for the fullscreen cyberdeck & DIY PDA launcher.
+    /// Clean lightly rounded tile style for the fullscreen cyberdeck & DIY PDA launcher.
     pub const fn pda_tile() -> Self {
         Self {
-            top_left: CornerStyle::Rounded(10),
-            top_right: CornerStyle::SharpCusp(8),
-            bottom_right: CornerStyle::Rounded(10),
-            bottom_left: CornerStyle::SharpCusp(8),
+            top_left: CornerStyle::Rounded(6),
+            top_right: CornerStyle::Rounded(6),
+            bottom_right: CornerStyle::Rounded(6),
+            bottom_left: CornerStyle::Rounded(6),
         }
     }
 
-    /// Modal dialog style with pronounced arc-cusp diagonal accent.
+    /// Crisp sharp-edged technical badge or terminal panel.
+    pub const fn sharp() -> Self {
+        Self {
+            top_left: CornerStyle::Sharp,
+            top_right: CornerStyle::Sharp,
+            bottom_right: CornerStyle::Sharp,
+            bottom_left: CornerStyle::Sharp,
+        }
+    }
+
+    /// Modal dialog style with subtle convex rounding (`radius = 8`).
     pub const fn modal() -> Self {
         Self {
-            top_left: CornerStyle::SharpCusp(12),
-            top_right: CornerStyle::Rounded(14),
-            bottom_right: CornerStyle::SharpCusp(12),
-            bottom_left: CornerStyle::Rounded(14),
+            top_left: CornerStyle::Rounded(8),
+            top_right: CornerStyle::Rounded(8),
+            bottom_right: CornerStyle::Rounded(8),
+            bottom_left: CornerStyle::Rounded(8),
         }
     }
 }
@@ -212,20 +222,14 @@ const fn corner_contains(dx: i32, dy: i32, corner: CornerStyle) -> bool {
     match corner {
         CornerStyle::Rounded(r_u16) => {
             let r = r_u16 as i32;
-            if dx >= r || dy >= r {
+            if r <= 0 || dx >= r || dy >= r {
                 return true;
             }
             let cx = r - 1 - dx;
             let cy = r - 1 - dy;
             cx * cx + cy * cy <= r * r
         }
-        CornerStyle::SharpCusp(d_u16) => {
-            let d = d_u16 as i32;
-            if dx < d && dy < d {
-                return dx * dx + dy * dy >= d * d;
-            }
-            true
-        }
+        CornerStyle::Sharp => true,
     }
 }
 
@@ -235,8 +239,8 @@ mod tests {
 
     #[test]
     fn lerp_and_easing_curves_are_monotonic() {
-        assert_eq!(lerp_color(0x005C_E1E6, 0x00F7_2585, 0), 0x005C_E1E6);
-        assert_eq!(lerp_color(0x005C_E1E6, 0x00F7_2585, 255), 0x00F7_2585);
+        assert_eq!(lerp_color(0x00F4_B41A, 0x00FF_D166, 0), 0x00F4_B41A);
+        assert_eq!(lerp_color(0x00F4_B41A, 0x00FF_D166, 255), 0x00FF_D166);
         assert_eq!(ease_out_cubic(0), 0);
         assert_eq!(ease_out_cubic(Q16_ONE), Q16_ONE);
         assert!(ease_out_cubic(Q16_ONE / 2) > Q16_ONE / 2);
@@ -263,10 +267,11 @@ mod tests {
     }
 
     #[test]
-    fn arc_sharp_has_cusp_and_rounded_corners() {
+    fn rounded_and_sharp_corners_render_cleanly() {
         let s = ArcSharpStyle::cyberdeck_card();
         assert!(!point_in_arc_sharp(0, 0, 80, 60, s));
-        assert!(point_in_arc_sharp(10, 0, 80, 60, s));
+        assert!(point_in_arc_sharp(6, 0, 80, 60, s));
         assert!(point_in_arc_sharp(40, 30, 80, 60, s));
+        assert!(point_in_arc_sharp(0, 0, 80, 60, ArcSharpStyle::sharp()));
     }
 }

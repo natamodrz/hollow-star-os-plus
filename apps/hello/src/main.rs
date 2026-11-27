@@ -7,10 +7,10 @@
 
 use libdelta_ui::delta_abi::{KeyCode, SVC_DESKTOP, SVC_VFS};
 use libdelta_ui::gfx::{
-    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_H, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL,
+    ACCENT, ACCENT_AMBER, ACCENT_YELLOW, APP_H, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL,
     TEXT,
 };
-use libdelta_ui::{ArcSharpStyle, DesktopClient, IconKind, draw_icon_2x};
+use libdelta_ui::{ArcSharpStyle, BufWriter, DesktopClient, IconKind, draw_icon_2x};
 
 #[unsafe(no_mangle)]
 fn delta_main() -> usize {
@@ -39,6 +39,24 @@ fn delta_main() -> usize {
     if libdelta::service_lookup(SVC_DESKTOP).is_ok()
         && let Ok(mut desktop) = DesktopClient::connect()
     {
+        let mut dylib_buf = [0u8; 48];
+        let mut dw = BufWriter::new(&mut dylib_buf);
+        if let Ok(kit) = libdelta::dyld::Dylib::open(vfs_cap, "/system/lib/libdelta_kit.dylib") {
+            // SAFETY: `delta_kit_abi_version` is an exported `extern "C" fn() -> u32`.
+            let abi = unsafe { kit.call_u32("delta_kit_abi_version") }.unwrap_or(0);
+            dw.str("libdelta_kit.dylib (ABI 0x");
+            let hex = b"0123456789ABCDEF";
+            for sh in (0..8).rev() {
+                let b = [hex[((abi >> (sh * 4)) & 0xF) as usize]];
+                if let Ok(s) = core::str::from_utf8(&b) {
+                    dw.str(s);
+                }
+            }
+            dw.str(")");
+        } else {
+            dw.str("static fallback");
+        }
+
         let c = &mut desktop.canvas;
         c.clear(BG);
         c.draw_arc_box(
@@ -48,34 +66,34 @@ fn delta_main() -> usize {
             (APP_H - 108) as i32,
             ArcSharpStyle::modal(),
             PANEL,
-            ACCENT_BLUE,
-            ACCENT_MAGENTA,
+            ACCENT_YELLOW,
+            ACCENT_AMBER,
         );
-        draw_icon_2x(c, 84, 82, IconKind::Hsapp, ACCENT_BLUE);
-        c.draw_text_scaled(132, 86, "Hello.hsapp Bundle Inspector", ACCENT_BLUE, 1);
+        draw_icon_2x(c, 84, 82, IconKind::Hsapp, ACCENT_YELLOW);
+        c.draw_text_scaled(132, 86, "Hello.hsapp Bundle Inspector", ACCENT_YELLOW, 1);
         c.draw_text(
             132,
             110,
-            "macOS-style bundle: /system/apps/Hello.hsapp/",
+            "Mach / OS X-style bundle: /system/apps/Hello.hsapp/",
             MUTED,
         );
 
-        c.draw_box(84, 148, (APP_W - 168) as i32, 130, BG, BORDER);
-        c.draw_text(102, 166, "Bundle Layout:", TEXT);
+        c.draw_box(84, 148, (APP_W - 168) as i32, 136, BG, BORDER);
+        c.draw_text(102, 162, "Bundle Layout & Dynamic Linker:", TEXT);
         c.draw_text(
             102,
-            190,
+            186,
             "  exec             -> AArch64 EL0 ELF executable",
             CYAN,
         );
         c.draw_text(
             102,
-            212,
+            208,
             "  icon.png         -> Bundle application emblem",
             CYAN,
         );
-        c.draw_text(102, 234, "  Assets/info.txt  -> Live loaded string:", CYAN);
-        c.draw_text(114, 256, asset_str, OK_GREEN);
+        c.draw_text(102, 230, asset_str, OK_GREEN);
+        c.draw_text(102, 254, dw.as_str(), ACCENT_AMBER);
 
         c.draw_box(180, 314, 280, 42, BG, ACCENT);
         c.draw_text_centered(

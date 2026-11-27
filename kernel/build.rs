@@ -47,6 +47,9 @@ fn main() {
         "userland/shell/Cargo.toml",
         "apps/hello/src/main.rs",
         "apps/hello/Cargo.toml",
+        "apps/dkex-diag/src/main.rs",
+        "apps/dkex-diag/Cargo.toml",
+        "userland/dylibs/libdelta_kit.rs",
         "apps/compositor/src/main.rs",
         "apps/compositor/Cargo.toml",
         "apps/setup/src/main.rs",
@@ -68,6 +71,7 @@ fn main() {
         "userland/libdelta-ui/src/client.rs",
         "userland/libdelta-ui/Cargo.toml",
         "userland/libdelta/src/lib.rs",
+        "userland/libdelta/src/dyld.rs",
         "userland/delta-abi/src/lib.rs",
         "userland/user.ld",
     ] {
@@ -102,6 +106,8 @@ fn main() {
             "--package",
             "hello-app",
             "--package",
+            "dkex-diag",
+            "--package",
             "compositor",
             "--package",
             "setup-app",
@@ -123,6 +129,42 @@ fn main() {
     assert!(status.success(), "building EL0 userland binaries failed");
 
     let elf_dir = userland_target.join("aarch64-unknown-none").join("release");
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let dylib_status = Command::new(rustc)
+        .current_dir(&workspace_root)
+        .args([
+            "--edition",
+            "2024",
+            "--crate-type",
+            "bin",
+            "--target",
+            "aarch64-unknown-none",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "relocation-model=pic",
+            "-C",
+            "link-arg=-shared",
+            "-C",
+            "link-arg=--export-dynamic",
+            "-C",
+            "link-arg=--hash-style=sysv",
+            "-C",
+            "link-arg=-z",
+            "-C",
+            "link-arg=max-page-size=4096",
+            "-D",
+            "warnings",
+            "-o",
+        ])
+        .arg(elf_dir.join("libdelta_kit.dylib"))
+        .arg(workspace_root.join("userland/dylibs/libdelta_kit.rs"))
+        .status()
+        .expect("failed to invoke rustc for EL0 libdelta_kit.dylib");
+    assert!(
+        dylib_status.success(),
+        "building EL0 libdelta_kit.dylib failed"
+    );
     println!(
         "cargo:rustc-env=DRV_UART_ELF={}",
         elf_dir.join("drv-uart").display()

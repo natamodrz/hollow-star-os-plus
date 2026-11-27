@@ -1,6 +1,7 @@
 //! Modernized Hollow Star UI pixel canvas (`XRGB8888`) backed by `Shm`
-//! featuring lightened slate palette (`#131926`/`#1B2336`), Light Blue (`#5CE1E6`) +
-//! Magenta (`#F72585`) accents, Arc-Sharp geometry, frosted blur, and Calibri/Monospace fonts.
+//! featuring lightened slate palette (`#131926`/`#1B2336`), Golden Yellow (`#F4B41A`) +
+//! Amber (`#FFD166`) accents, subtly rounded panels + concave Bezier star emblem,
+//! frosted blur, and Calibri/Monospace fonts.
 
 use crate::calibri::{FONT_HEIGHT, MONO_WIDTH, glyph_calibri, glyph_mono, measure_calibri};
 use crate::fx::{ArcSharpStyle, Rect, blur_tinted_panel, lerp_color, point_in_arc_sharp};
@@ -20,23 +21,19 @@ pub const PANEL_ALT: u32 = 0x0022_2C42;
 /// Subtle structural border (`#384766`).
 pub const BORDER: u32 = 0x0038_4766;
 
-/// Primary Light Blue / Sky-Cyan accent (`#5CE1E6`).
-pub const ACCENT_BLUE: u32 = 0x005C_E1E6;
-/// Muted Light Blue accent (`#2B6F80`).
-pub const ACCENT_BLUE_DIM: u32 = 0x002B_6F80;
-/// Secondary Magenta accent (`#F72585`).
-pub const ACCENT_MAGENTA: u32 = 0x00F7_2585;
-/// Muted Magenta accent (`#7A1D54`).
-pub const ACCENT_MAGENTA_DIM: u32 = 0x007A_1D54;
+/// Primary Golden Yellow accent (`#F4B41A`).
+pub const ACCENT_YELLOW: u32 = 0x00F4_B41A;
+/// Warm Amber highlight (`#FFD166`) paired with Golden Yellow gradients.
+pub const ACCENT_AMBER: u32 = 0x00FF_D166;
+/// Muted warm Gold border/divider (`#8A6210`).
+pub const ACCENT_GOLD_DIM: u32 = 0x008A_6210;
 
-/// Canonical primary accent alias (Light Blue).
-pub const ACCENT: u32 = ACCENT_BLUE;
-/// Canonical dim accent alias (Muted Light Blue).
-pub const ACCENT_DIM: u32 = ACCENT_BLUE_DIM;
-/// Secondary Magenta alias.
-pub const MAGENTA: u32 = ACCENT_MAGENTA;
-/// Light Blue alias.
-pub const CYAN: u32 = ACCENT_BLUE;
+/// Canonical primary accent alias (Golden Yellow).
+pub const ACCENT: u32 = ACCENT_YELLOW;
+/// Canonical dim accent alias (Warm Gold).
+pub const ACCENT_DIM: u32 = ACCENT_GOLD_DIM;
+/// Secondary slate-cyan for metadata/paths (`#5CE1E6`).
+pub const CYAN: u32 = 0x005C_E1E6;
 
 /// Primary crisp foreground text (`#EDF2FA`).
 pub const TEXT: u32 = 0x00ED_F2FA;
@@ -227,20 +224,13 @@ impl Canvas {
     }
 
     /// Draws the 5-pointed **Hollow Star** emblem using smooth concave quadratic Bezier arcs
-    /// meeting at crisp, sharp star tips with a Light Blue -> Magenta gradient.
+    /// meeting at crisp, sharp star tips with a Golden Yellow -> Warm Amber gradient.
     pub fn draw_hollow_star(&mut self, cx: i32, cy: i32, r_outer: i32, _color_unused: u32) {
-        self.draw_arc_star(cx, cy, r_outer, ACCENT_BLUE, ACCENT_MAGENTA);
+        self.draw_arc_star(cx, cy, r_outer, ACCENT_YELLOW, ACCENT_AMBER);
     }
 
     /// Draws the concave-arc Hollow Star logo with an explicit two-color gradient.
-    pub fn draw_arc_star(
-        &mut self,
-        cx: i32,
-        cy: i32,
-        r_outer: i32,
-        color_blue: u32,
-        color_magenta: u32,
-    ) {
+    pub fn draw_arc_star(&mut self, cx: i32, cy: i32, r_outer: i32, color_a: u32, color_b: u32) {
         if r_outer <= 2 {
             return;
         }
@@ -264,7 +254,7 @@ impl Canvas {
                 let qx = (inv * inv * p0x + 2 * inv * t * p1x + t * t * p2x) / 784;
                 let qy = (inv * inv * p0y + 2 * inv * t * p1y + t * t * p2y) / 784;
                 let grad_t = (((i as i32) * 28 + step) * 255 / 140) as u8;
-                let col = lerp_color(color_blue, color_magenta, grad_t);
+                let col = lerp_color(color_a, color_b, grad_t);
                 self.draw_line(prev_x, prev_y, qx, qy, col);
                 prev_x = qx;
                 prev_y = qy;

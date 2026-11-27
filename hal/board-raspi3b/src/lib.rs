@@ -98,6 +98,7 @@ impl Raspi3bBoard {
 
         let mut console = ActiveConsole::new();
         console.init();
+        gpio::configure_emmc_pins();
 
         let mut irq = irq::Bcm2837IrqController::new();
         irq.init();

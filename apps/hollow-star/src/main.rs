@@ -17,7 +17,7 @@ use libdelta_ui::delta_abi::{
     SVC_FB, SVC_VFS, SysCaps, VfsPartitionStat, pack_msg, unpack_msg,
 };
 use libdelta_ui::gfx::{
-    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, CYAN, Canvas, MUTED, OK_GREEN, PANEL,
+    ACCENT, ACCENT_AMBER, ACCENT_YELLOW, APP_W, BG, BORDER, CYAN, Canvas, MUTED, OK_GREEN, PANEL,
     PANEL_ALT, TEXT,
 };
 use libdelta_ui::{ArcSharpStyle, BufWriter, DesktopClient, Lang, OsConfig, tr, wireless_enabled};
@@ -540,10 +540,10 @@ fn draw_app_header(c: &mut Canvas, title: &str, hint: &str) {
         40,
         ArcSharpStyle::cyberdeck_card(),
         PANEL,
-        ACCENT_BLUE,
-        ACCENT_MAGENTA,
+        ACCENT_YELLOW,
+        ACCENT_AMBER,
     );
-    c.draw_text(28, 23, title, ACCENT_BLUE);
+    c.draw_text(28, 23, title, ACCENT_YELLOW);
     c.draw_text_right((APP_W - 28) as i32, 23, hint, MUTED);
 }
 
@@ -634,6 +634,12 @@ fn render_sysinfo(c: &mut Canvas, app: &AppState, lang: Lang) {
         y += 26;
     }
 
+    c.draw_text(
+        34,
+        356,
+        "Mach/OSX: /system/Library/Extensions (*.dkex) + /system/lib/*.dylib",
+        CYAN,
+    );
     c.draw_text(34, 396, "[Esc / Enter] Launcher", MUTED);
 }
 

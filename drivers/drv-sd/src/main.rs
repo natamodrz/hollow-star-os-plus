@@ -101,8 +101,8 @@ impl EmmcDriver {
     }
 
     fn wait_interrupt(&self, mask: u32) -> Result<u32, isize> {
-        // Fast check in case command/transfer completed synchronously (e.g. QEMU SDHCI).
-        for spins in 0..200_000u32 {
+        // Fast check for synchronous completion (QEMU SDHCI / fast responses).
+        for spins in 0..50_000u32 {
             let irpt = self.read(INTERRUPT);
             if (irpt & INT_ERROR_MASK) != 0 {
                 self.write(INTERRUPT, irpt);
@@ -112,17 +112,17 @@ impl EmmcDriver {
                 self.write(INTERRUPT, irpt & mask);
                 return Ok(irpt);
             }
-            if spins == 50_000 {
-                // Enable IRQ delivery and acknowledge line if hardware is still busy.
+            if spins == 10_000 {
                 self.write(IRPT_EN, mask | INT_ERROR_MASK);
                 let _ = libdelta::irq_ack(self.irq_num);
             }
             core::hint::spin_loop();
         }
 
-        // Wait on bound EL0 IRQ port if interrupt hasn't fired yet.
+        // Wait up to 800 ms on real SD hardware while servicing bound IRQ 62 notifications.
         let mut msg = IpcMessage::new(0);
-        for _ in 0..10 {
+        let deadline = Self::now_ms().saturating_add(800);
+        loop {
             let irpt = self.read(INTERRUPT);
             if (irpt & INT_ERROR_MASK) != 0 {
                 self.write(INTERRUPT, irpt);
@@ -134,9 +134,13 @@ impl EmmcDriver {
             }
             if libdelta::port_recv(self.irq_port, &mut msg).is_ok() && msg.tag == MSG_IRQ_NOTIFY {
                 let _ = libdelta::irq_ack(self.irq_num);
+            } else {
+                if Self::now_ms() >= deadline {
+                    return Err(errno::EIO);
+                }
+                libdelta::yield_now();
             }
         }
-        Err(errno::EIO)
     }
 
     fn send_cmd(&self, cmdtm: u32, arg: u32) -> Result<u32, isize> {
@@ -176,25 +180,39 @@ impl EmmcDriver {
         self.write(CONTROL1, c1);
     }
 
+    fn now_ms() -> u64 {
+        libdelta::sys_caps().map(|c| c.uptime_ms).unwrap_or(0)
+    }
+
+    fn delay_ms(ms: u64) {
+        let end = Self::now_ms().saturating_add(ms);
+        while Self::now_ms() < end {
+            libdelta::yield_now();
+        }
+    }
+
     fn init_card(&mut self) -> Result<(), isize> {
-        // Reset host controller.
+        // Reset host controller cleanly and allow settling time on physical SD slots.
         self.write(CONTROL0, 0);
         self.write(CONTROL1, CTRL1_SRST_HC);
-        for _ in 0..100_000 {
+        for _ in 0..200_000 {
             if (self.read(CONTROL1) & CTRL1_SRST_HC) == 0 {
                 break;
             }
             core::hint::spin_loop();
         }
+        Self::delay_ms(5);
 
-        // Enable internal clock at slow init rate and unmask status bits.
+        // Enable internal clock at slow init rate (~400-650 kHz) and unmask status bits.
         self.set_clock(0x40);
+        Self::delay_ms(2);
         self.write(IRPT_MASK, 0xFFFF_FFFF);
         self.write(IRPT_EN, 0);
         self.write(INTERRUPT, 0xFFFF_FFFF);
 
         // CMD0: GO_IDLE_STATE
         self.send_cmd(make_cmd(0, CMD_RSPNS_NONE), 0)?;
+        Self::delay_ms(2);
 
         // CMD8: SEND_IF_COND (2.7-3.6V, check pattern 0xAA)
         let r7 = self.send_cmd(
@@ -203,16 +221,17 @@ impl EmmcDriver {
         )?;
         let v2 = (r7 & 0xFFF) == 0x1AA;
 
-        // ACMD41: SD_SEND_OP_COND with HCS=1 for SDHC/SDXC
+        // ACMD41: SD_SEND_OP_COND with HCS=1 for SDHC/SDXC (physical cards may take >500ms)
         let hcs = if v2 { 1 << 30 } else { 0 };
-        let mut ocr = 0u32;
-        for _ in 0..1000 {
+        let mut ocr;
+        let deadline = Self::now_ms().saturating_add(1500);
+        loop {
             self.send_cmd(make_cmd(55, CMD_RSPNS_48 | CMD_CRCCHK_EN | CMD_IXCHK_EN), 0)?;
             ocr = self.send_cmd(make_cmd(41, CMD_RSPNS_48), hcs | 0x00FF_8000)?;
-            if (ocr & (1 << 31)) != 0 {
+            if (ocr & (1 << 31)) != 0 || Self::now_ms() >= deadline {
                 break;
             }
-            libdelta::yield_now();
+            Self::delay_ms(5);
         }
         if (ocr & (1 << 31)) == 0 {
             return Err(errno::EIO);
@@ -263,7 +282,8 @@ impl EmmcDriver {
         }
 
         // Switch to reliable transfer clock compatible with physical SD cards and QEMU.
-        self.set_clock(0x02);
+        self.set_clock(0x04);
+        Self::delay_ms(2);
         Ok(())
     }
 

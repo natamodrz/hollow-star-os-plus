@@ -291,6 +291,57 @@ pub fn map_user_page(
     Ok(())
 }
 
+/// Updates access permissions of an already mapped EL0 4 KiB page inside `user_l0`
+/// (used by Mach-style `VmProtect` / `dyld` `.dylib` loading with strict W^X).
+pub fn protect_user_page(
+    user_l0: PhysAddr,
+    va: VirtAddr,
+    attrs: UserPageAttrs,
+) -> Result<(), MmuError> {
+    if va.as_usize() >= USER_VA_LIMIT || !va.is_page_aligned() {
+        return Err(MmuError::InvalidUserAddress);
+    }
+    let l0 = table_ref(user_l0);
+    let e0 = l0.entries[va.l0_index()];
+    if (e0 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return Err(MmuError::InvalidUserAddress);
+    }
+    let l1 = table_ref(PhysAddr((e0 & PA_MASK) as usize));
+    let e1 = l1.entries[va.l1_index()];
+    if (e1 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return Err(MmuError::InvalidUserAddress);
+    }
+    let l2 = table_ref(PhysAddr((e1 & PA_MASK) as usize));
+    let e2 = l2.entries[va.l2_index()];
+    if (e2 & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return Err(MmuError::InvalidUserAddress);
+    }
+    let l3 = table_mut(PhysAddr((e2 & PA_MASK) as usize));
+    let old = l3.entries[va.l3_index()];
+    if (old & (DESC_VALID | DESC_PAGE)) != (DESC_VALID | DESC_PAGE) {
+        return Err(MmuError::InvalidUserAddress);
+    }
+    let pa = old & PA_MASK;
+    l3.entries[va.l3_index()] = pa | attrs.descriptor_bits() | DESC_PAGE | DESC_VALID;
+
+    // SAFETY: Clean D-cache lines and invalidate I-cache + TLB when re-protecting `.dylib` code pages.
+    unsafe {
+        if matches!(attrs, UserPageAttrs::Code) {
+            let mut off = 0usize;
+            while off < PAGE_SIZE {
+                let ptr = phys_to_mut_ptr::<u8>(PhysAddr(pa as usize)) as usize + off;
+                asm!("dc cvau, {p}", p = in(reg) ptr, options(nostack));
+                off += 64;
+            }
+            asm!("dsb ish", "ic ialluis", options(nostack));
+        } else {
+            asm!("dsb ishst", options(nostack));
+        }
+        asm!("tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+    }
+    Ok(())
+}
+
 /// Unmaps a single 4 KiB page from an EL0 process's `TTBR0_EL1` table and invalidates TLB.
 pub fn unmap_user_page(user_l0: PhysAddr, va: VirtAddr) -> Option<PhysAddr> {
     if va.as_usize() >= USER_VA_LIMIT || !va.is_page_aligned() {

@@ -122,27 +122,27 @@ for _ in range(3):
 qmp_cmd({"execute": "screendump", "arguments": {"filename": str(ppm_launcher)}})
 time.sleep(0.25)
 
-# 2. Launch Terminal.hsapp (focused tile 0) via USB Enter, type `df`, `uname`, `exit`
+# 2. Launch Terminal.hsapp (focused tile 0) via USB Enter, test df, dkexstat, dylibs, uname
 send_usb_key("ret", 0.65)
-for ch in ("d", "f", "ret", "u", "n", "a", "m", "e", "ret"):
-    send_usb_key(ch, 0.12)
+for cmd_str in ("df", "dkexstat", "dylibs", "uname"):
+    for ch in cmd_str:
+        send_usb_key(ch, 0.08)
+    send_usb_key("ret", 0.16)
 time.sleep(0.3)
 qmp_cmd({"execute": "screendump", "arguments": {"filename": str(ppm_terminal)}})
 time.sleep(0.2)
+
+# 3. Navigate purely via USB HID Keyboard (no UART console!):
+#    Esc -> Launcher -> '9' (Hello.hsapp + dylib) -> Enter -> '5' (Media RT) -> Space -> Esc
+send_usb_key("esc", 0.45)
+send_usb_key("9", 0.45)
+send_usb_key("ret", 0.45)
+send_usb_key("5", 0.45)
+send_usb_key("spc", 0.45)
+send_usb_key("esc", 0.45)
 sock.close()
 
-# 3. Return from Terminal -> Launcher -> Open Hello.hsapp (9) -> Esc -> Open Media RT (5) -> Space -> Esc -> Exit to Shell (X)
-for key in (b"\x1b", b"9", b"\n", b"5", b" ", b"\x1b", b"x"):
-    proc.stdin.write(key)
-    proc.stdin.flush()
-    time.sleep(0.45)
-
-for shell_cmd in (b"df\n", b"uname\n", b"ls /system/apps\n", b"ls /system/bin\n"):
-    proc.stdin.write(shell_cmd)
-    proc.stdin.flush()
-    time.sleep(0.35)
-
-time.sleep(0.4)
+time.sleep(0.35)
 proc.terminate()
 out_bytes, _ = proc.communicate(timeout=5)
 out_text = out_bytes.decode("utf-8", errors="replace")
@@ -175,15 +175,11 @@ checks = {
     "USB HID Keyboard (drv-kbd hub + kbd)": "[el0/drv-kbd] USB HID Keyboard enumerated" in out_text and changed_pixels,
     "Audio RT (Priority 110 + WAV)": "[el0/drv-audio] Real-Time Audio server online (EL0, Priority 110" in out_text and wav_path.exists(),
     "Network Device (QEMU usb-net + kernel)": "KERNEL PANIC" not in out_text and "panicked at" not in out_text,
-    "Storage (DeltaFS /boot+/system+/user)": "/boot -> FAT32" in out_text and "/system -> DeltaFS" in out_text and "/user -> DeltaFS" in out_text,
+    "Storage & Mach/OSX (.dkex + .dylib)": "[el0/shell] DeltaFS WAL write & read-back" in out_text and "[el0/DeltaDiag.dkex] Loaded Mach .dkex extension + libdelta_kit.dylib (dyld W^X OK)" in out_text,
     "Modular Desktop (Compositor/Launcher/Term)": (
-        "compositor.elf" in out_text
-        and "Setup.hsapp/" in out_text
-        and "Launcher.hsapp/" in out_text
-        and "Terminal.hsapp/" in out_text
-        and "Apps.hsapp/" in out_text
-        and "Hello.hsapp/" in out_text
-        and "[el0/shell] Returned from Desktop Compositor" in out_text
+        "[el0/compositor] Desktop compositor ready" in out_text
+        and "[el0/Hello.hsapp] Loaded asset:" in out_text
+        and "[boot] Milestone M6" in out_text
     ),
 }
 

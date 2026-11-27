@@ -4,8 +4,12 @@ use crate::GPIO_BASE;
 use crate::mmio::MmioBlock;
 
 const GPFSEL1_OFFSET: usize = 0x04;
+const GPFSEL3_OFFSET: usize = 0x0C;
+const GPFSEL4_OFFSET: usize = 0x10;
+const GPFSEL5_OFFSET: usize = 0x14;
 const GPPUD_OFFSET: usize = 0x94;
 const GPPUDCLK0_OFFSET: usize = 0x98;
+const GPPUDCLK1_OFFSET: usize = 0x9C;
 
 /// Alternate function mode for BCM2837 GPIO pins.
 #[derive(Clone, Copy)]
@@ -37,6 +41,36 @@ pub fn configure_uart_pins(alt: GpioAlt) {
     spin_cycles(150);
     gpio.write(GPPUD_OFFSET, 0);
     gpio.write(GPPUDCLK0_OFFSET, 0);
+}
+
+/// Routes GPIO 48..53 (microSD slot) to ALT3 (`Arasan EMMC SD1`) and sets GPIO 34..39
+/// (Wi-Fi SDIO) to passive inputs so `drv-sd` owns the physical microSD card cleanly on RPi 3B.
+pub fn configure_emmc_pins() {
+    // SAFETY: `GPIO_BASE` is the fixed physical BCM2837 GPIO base identity-mapped during early boot.
+    let gpio = unsafe { MmioBlock::new(GPIO_BASE) };
+
+    // Disconnect GPIO 34..39 from SD1 (`GPFSEL3` bits [29:12] = 0b000 Input).
+    let mut gpfsel3 = gpio.read(GPFSEL3_OFFSET);
+    gpfsel3 &= !(0x3FFFF << 12);
+    gpio.write(GPFSEL3_OFFSET, gpfsel3);
+
+    // Route GPIO 48..49 (`GPFSEL4` bits [29:24]) to ALT3 (`0b111`).
+    let mut gpfsel4 = gpio.read(GPFSEL4_OFFSET);
+    gpfsel4 |= (0b111 << 24) | (0b111 << 27);
+    gpio.write(GPFSEL4_OFFSET, gpfsel4);
+
+    // Route GPIO 50..53 (`GPFSEL5` bits [11:0]) to ALT3 (`0b111`).
+    let mut gpfsel5 = gpio.read(GPFSEL5_OFFSET);
+    gpfsel5 |= 0b111 | (0b111 << 3) | (0b111 << 6) | (0b111 << 9);
+    gpio.write(GPFSEL5_OFFSET, gpfsel5);
+
+    // Enable weak pull-ups on CMD/DAT0..3 (GPIO 49..53 = bits 17..21 in GPPUDCLK1) per SDHCI spec.
+    gpio.write(GPPUD_OFFSET, 2);
+    spin_cycles(150);
+    gpio.write(GPPUDCLK1_OFFSET, 0b11111 << 17);
+    spin_cycles(150);
+    gpio.write(GPPUD_OFFSET, 0);
+    gpio.write(GPPUDCLK1_OFFSET, 0);
 }
 
 fn spin_cycles(count: usize) {

@@ -26,6 +26,11 @@ pub fn framebuffer_phys_window() -> Option<(usize, usize)> {
     *FB_WINDOW.lock()
 }
 
+/// Updates the VideoCore/display framebuffer physical window (e.g. after DTB reports `gpu_mem` split).
+pub fn set_framebuffer_phys_window(fb_window: Option<(usize, usize)>) {
+    *FB_WINDOW.lock() = fb_window;
+}
+
 #[cfg(all(not(feature = "board-raspi3b"), not(feature = "board-raspi02w")))]
 compile_error!(
     "Enable a board feature (`board-raspi3b` or `board-raspi02w`) to build Delta Kernel."

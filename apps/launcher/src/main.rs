@@ -6,7 +6,7 @@
 
 use libdelta_ui::delta_abi::{KeyCode, SVC_VFS, SysCaps};
 use libdelta_ui::gfx::{
-    ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, MUTED, PANEL, PANEL_ALT, TEXT,
+    ACCENT_AMBER, ACCENT_YELLOW, APP_W, BG, BORDER, CYAN, MUTED, PANEL, PANEL_ALT, TEXT,
 };
 use libdelta_ui::{
     ArcSharpStyle, BufWriter, DesktopClient, IconKind, OsConfig, draw_icon_2x, ease_out_cubic,
@@ -22,7 +22,7 @@ struct AppEntry {
     arg: u64,
 }
 
-const APPS: [AppEntry; 11] = [
+const APPS: [AppEntry; 10] = [
     AppEntry {
         key_hint: "1",
         en: "Terminal",
@@ -103,14 +103,6 @@ const APPS: [AppEntry; 11] = [
         exec_path: "/system/apps/Setup.hsapp/exec",
         arg: 0,
     },
-    AppEntry {
-        key_hint: "X",
-        en: "UART Shell",
-        pl: "Konsola UART",
-        icon: IconKind::Shell,
-        exec_path: "",
-        arg: 0,
-    },
 ];
 
 #[unsafe(no_mangle)]
@@ -124,7 +116,9 @@ fn delta_main() -> usize {
     let mut cfg = OsConfig::defaults();
     cfg.load_from_vfs(vfs);
 
-    let bundle_count = count_hsapps(vfs, "/system/apps") + count_hsapps(vfs, "/user/apps");
+    let bundle_count =
+        count_entries(vfs, "/system/apps", ".hsapp") + count_entries(vfs, "/user/apps", ".hsapp");
+    let dkex_count = count_entries(vfs, "/system/Library/Extensions", ".dkex");
     let mut selected = 0usize;
     let mut prev_selected = 0usize;
     let mut dirty = true;
@@ -139,10 +133,19 @@ fn delta_main() -> usize {
                     prev_selected,
                     selected,
                     bundle_count,
+                    dkex_count,
                 );
                 prev_selected = selected;
             }
-            render_launcher(&mut desktop, &cfg, &caps, selected, bundle_count, None);
+            render_launcher(
+                &mut desktop,
+                &cfg,
+                &caps,
+                selected,
+                bundle_count,
+                dkex_count,
+                None,
+            );
             desktop.present();
             dirty = false;
         }
@@ -153,11 +156,7 @@ fn delta_main() -> usize {
         };
 
         match key {
-            KeyCode::Right => {
-                selected = (selected + 1) % APPS.len();
-                dirty = true;
-            }
-            KeyCode::Tab => {
+            KeyCode::Right | KeyCode::Tab => {
                 selected = (selected + 1) % APPS.len();
                 dirty = true;
             }
@@ -170,6 +169,9 @@ fn delta_main() -> usize {
                     selected += 4;
                 } else {
                     selected %= 4;
+                    if selected >= APPS.len() {
+                        selected = APPS.len() - 1;
+                    }
                 }
                 dirty = true;
             }
@@ -188,30 +190,19 @@ fn delta_main() -> usize {
             }
             KeyCode::Enter => {
                 let entry = &APPS[selected];
-                if entry.exec_path.is_empty() {
-                    desktop.request_exit_to_shell();
-                    return 0;
-                }
                 desktop.request_launch(entry.exec_path, entry.arg);
-                return 0;
-            }
-            KeyCode::Esc => {
-                desktop.request_exit_to_shell();
                 return 0;
             }
             KeyCode::Char => {
                 let idx = match ch {
                     b'1'..=b'9' => Some(usize::from(ch - b'1')),
                     b'0' => Some(9),
-                    b'x' | b'X' => Some(10),
                     _ => None,
                 };
-                if let Some(target) = idx {
+                if let Some(target) = idx
+                    && target < APPS.len()
+                {
                     let entry = &APPS[target];
-                    if entry.exec_path.is_empty() {
-                        desktop.request_exit_to_shell();
-                        return 0;
-                    }
                     desktop.request_launch(entry.exec_path, entry.arg);
                     return 0;
                 }
@@ -221,7 +212,7 @@ fn delta_main() -> usize {
     }
 }
 
-fn count_hsapps(vfs: usize, dir: &str) -> u32 {
+fn count_entries(vfs: usize, dir: &str, suffix: &str) -> u32 {
     let mut buf = [0u8; 1024];
     let Ok(n) = libdelta::vfs_readdir(vfs, dir, &mut buf) else {
         return 0;
@@ -229,7 +220,7 @@ fn count_hsapps(vfs: usize, dir: &str) -> u32 {
     let Ok(listing) = core::str::from_utf8(&buf[..n]) else {
         return 0;
     };
-    listing.lines().filter(|l| l.contains(".hsapp")).count() as u32
+    listing.lines().filter(|l| l.contains(suffix)).count() as u32
 }
 
 const GRID_X: i32 = 16;
@@ -255,6 +246,7 @@ fn animate_focus(
     from: usize,
     to: usize,
     bundle_count: u32,
+    dkex_count: u32,
 ) {
     let (fx, fy) = tile_pos(from);
     let (tx, ty) = tile_pos(to);
@@ -262,10 +254,18 @@ fn animate_focus(
         let p = ease_out_cubic((step * 255) / 3) as i32;
         let gx = fx + ((tx - fx) * p) / 255;
         let gy = fy + ((ty - fy) * p) / 255;
-        let glow = lerp_color(ACCENT_MAGENTA, ACCENT_BLUE, p as u8);
-        render_launcher(desktop, cfg, caps, to, bundle_count, Some((gx, gy, glow)));
+        let glow = lerp_color(ACCENT_AMBER, ACCENT_YELLOW, p as u8);
+        render_launcher(
+            desktop,
+            cfg,
+            caps,
+            to,
+            bundle_count,
+            dkex_count,
+            Some((gx, gy, glow)),
+        );
         desktop.present();
-        sleep_ms(10);
+        sleep_ms(12);
     }
 }
 
@@ -275,6 +275,7 @@ fn render_launcher(
     caps: &SysCaps,
     selected: usize,
     bundle_count: u32,
+    dkex_count: u32,
     glide: Option<(i32, i32, u32)>,
 ) {
     let lang = cfg.lang;
@@ -289,17 +290,17 @@ fn render_launcher(
         44,
         ArcSharpStyle::cyberdeck_card(),
         PANEL,
-        ACCENT_BLUE,
-        ACCENT_MAGENTA,
+        ACCENT_YELLOW,
+        ACCENT_AMBER,
     );
-    c.draw_arc_star(34, 29, 8, ACCENT_BLUE, ACCENT_MAGENTA);
+    c.draw_arc_star(34, 29, 8, ACCENT_YELLOW, ACCENT_AMBER);
     c.draw_text(
         50,
         21,
         tr(lang, "CYBERDECK LAUNCHER", "LAUNCHER CYBERDECK"),
-        ACCENT_BLUE,
+        ACCENT_YELLOW,
     );
-    c.fill_gradient_h(26, 48, (APP_W - 52) as i32, 2, ACCENT_BLUE, ACCENT_MAGENTA);
+    c.fill_gradient_h(26, 48, (APP_W - 52) as i32, 2, ACCENT_YELLOW, ACCENT_AMBER);
 
     let mut stats = [0u8; 96];
     let mut sw = BufWriter::new(&mut stats);
@@ -310,7 +311,7 @@ fn render_launcher(
     sw.str(caps.board_name_str());
     c.draw_text_right((APP_W - 28) as i32, 21, sw.as_str(), MUTED);
 
-    // 4 columns x 3 rows fullscreen tile grid
+    // 4 columns x 3 rows fullscreen tile grid (slots 0..9 = apps)
     for (idx, item) in APPS.iter().enumerate() {
         let (x, y) = tile_pos(idx);
         let active = idx == selected;
@@ -322,8 +323,8 @@ fn render_launcher(
             TILE_H,
             ArcSharpStyle::pda_tile(),
             if active { PANEL_ALT } else { PANEL },
-            if active { ACCENT_BLUE } else { BORDER },
-            if active { ACCENT_MAGENTA } else { BORDER },
+            if active { ACCENT_YELLOW } else { BORDER },
+            if active { ACCENT_AMBER } else { BORDER },
         );
         if active {
             c.fill_gradient_h(
@@ -331,8 +332,8 @@ fn render_launcher(
                 y + TILE_H - 8,
                 TILE_W - 28,
                 3,
-                ACCENT_BLUE,
-                ACCENT_MAGENTA,
+                ACCENT_YELLOW,
+                ACCENT_AMBER,
             );
         }
 
@@ -341,7 +342,7 @@ fn render_launcher(
             x + (TILE_W - 32) / 2,
             y + 20,
             item.icon,
-            if active { ACCENT_BLUE } else { TEXT },
+            if active { ACCENT_YELLOW } else { TEXT },
         );
 
         let label = tr(lang, item.en, item.pl);
@@ -362,7 +363,7 @@ fn render_launcher(
             x + 10,
             y + 8,
             bw.as_str(),
-            if active { ACCENT_MAGENTA } else { MUTED },
+            if active { ACCENT_AMBER } else { MUTED },
         );
     }
 
@@ -375,11 +376,37 @@ fn render_launcher(
             ArcSharpStyle::pda_tile(),
             PANEL_ALT,
             glow,
-            ACCENT_MAGENTA,
+            ACCENT_AMBER,
         );
     }
 
-    // Cyberdeck / PDA Identity card in bottom-right 12th slot (`col=3, row=2`)
+    // Slot 11 (`col=2, row=2`): Mach/OSX Runtime Telemetry (.dkex + .dylib)
+    let (mach_x, mach_y) = tile_pos(10);
+    c.draw_arc_box(
+        mach_x,
+        mach_y,
+        TILE_W,
+        TILE_H,
+        ArcSharpStyle::pda_tile(),
+        PANEL,
+        BORDER,
+        BORDER,
+    );
+    c.draw_text_centered(mach_x + TILE_W / 2, mach_y + 22, "Mach / OSX ABI", MUTED, 1);
+    let mut kbuf = [0u8; 24];
+    let mut kw = BufWriter::new(&mut kbuf);
+    kw.u32(dkex_count);
+    kw.str(" .dkex loaded");
+    c.draw_text_centered(
+        mach_x + TILE_W / 2,
+        mach_y + 46,
+        kw.as_str(),
+        ACCENT_YELLOW,
+        1,
+    );
+    c.draw_text_centered(mach_x + TILE_W / 2, mach_y + 70, "dyld .dylib OK", CYAN, 1);
+
+    // Slot 12 (`col=3, row=2`): Cyberdeck / PDA Identity card
     let (info_x, info_y) = tile_pos(11);
     c.draw_arc_box(
         info_x,
@@ -388,29 +415,29 @@ fn render_launcher(
         TILE_H,
         ArcSharpStyle::pda_tile(),
         PANEL,
-        ACCENT_BLUE,
-        ACCENT_MAGENTA,
+        ACCENT_YELLOW,
+        ACCENT_AMBER,
     );
     c.draw_arc_star(
         info_x + TILE_W / 2,
         info_y + 24,
         9,
-        ACCENT_BLUE,
-        ACCENT_MAGENTA,
+        ACCENT_YELLOW,
+        ACCENT_AMBER,
     );
     c.draw_text_centered(info_x + TILE_W / 2, info_y + 42, "Hollow Star+", TEXT, 1);
     c.draw_text_centered(
         info_x + TILE_W / 2,
         info_y + 60,
         "PDA / SBC Mode",
-        ACCENT_BLUE,
+        ACCENT_YELLOW,
         1,
     );
     c.draw_text_centered(
         info_x + TILE_W / 2,
         info_y + 78,
         "v0.6.0-rc.2",
-        ACCENT_MAGENTA,
+        ACCENT_AMBER,
         1,
     );
 
@@ -422,15 +449,15 @@ fn render_launcher(
         ArcSharpStyle::cyberdeck_card(),
         PANEL_ALT,
         BORDER,
-        ACCENT_MAGENTA,
+        ACCENT_YELLOW,
     );
     c.draw_text_centered(
         (APP_W / 2) as i32,
         415,
         tr(
             lang,
-            "[Arrows/Tab] Select   [Enter / 1-9,0] Launch   [X/Esc] Shell   [F1] Help",
-            "[Strzalki/Tab] Wybierz   [Enter / 1-9,0] Uruchom   [X/Esc] Konsola   [F1] Pomoc",
+            "[Arrows/Tab] Select   [Enter / 1-9,0] Launch   [F1] Help",
+            "[Strzalki/Tab] Wybierz   [Enter / 1-9,0] Uruchom   [F1] Pomoc",
         ),
         TEXT,
         1,

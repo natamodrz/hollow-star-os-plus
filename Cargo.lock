@@ -30,6 +30,13 @@ name = "delta-abi"
 version = "0.6.0-rc.2"
 
 [[package]]
+name = "dkex-diag"
+version = "0.6.0-rc.2"
+dependencies = [
+ "libdelta",
+]
+
+[[package]]
 name = "drv-audio"
 version = "0.6.0-rc.2"
 dependencies = [

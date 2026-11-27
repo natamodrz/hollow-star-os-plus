@@ -83,7 +83,17 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
     }
 
+    syscall::init_boot_counter();
     let (dtb_ram, dtb_span) = inspect_dtb(&mut active_board, dtb_ptr, &info);
+    if let (Some((ram_base, ram_size)), Some((fb_base, fb_size))) =
+        (dtb_ram, board::framebuffer_phys_window())
+    {
+        let dtb_end = ram_base.saturating_add(ram_size) as usize;
+        let fb_end = fb_base.saturating_add(fb_size);
+        if dtb_end < fb_end {
+            board::set_framebuffer_phys_window(Some((dtb_end, fb_end - dtb_end)));
+        }
+    }
 
     // Initialize 4 KiB physical frame allocator (PMM).
     pmm::init(active_board.memory_regions(), dtb_ram, dtb_span, &layout);

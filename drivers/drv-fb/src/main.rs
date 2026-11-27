@@ -69,6 +69,11 @@ impl MailboxFb {
             write_volatile(dma_words.add(1), 0); // request
         }
         fence(Ordering::SeqCst);
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: Ensure NormalNc stores reach SDRAM before triggering VideoCore Mailbox MMIO.
+        unsafe {
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
 
         let bus_addr = (self.dma_pa.wrapping_add(self.vc_bus_offset) as u32) & !0xF;
         let msg = bus_addr | MBOX_CH_PROP;
@@ -90,6 +95,11 @@ impl MailboxFb {
             }
             let resp = self.mbox_read(MBOX_READ);
             if resp == msg {
+                #[cfg(target_arch = "aarch64")]
+                // SAFETY: Order subsequent reads from `dma_va` after Mailbox MMIO response.
+                unsafe {
+                    core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                }
                 fence(Ordering::SeqCst);
                 // SAFETY: `dma_va` holds the property response status word at index 1.
                 let code = unsafe { read_volatile(dma_words.add(1)) };
@@ -148,7 +158,7 @@ impl MailboxFb {
         let pitch_val_idx = idx + 3;
         put(&mut idx, TAG_GET_PITCH);
         put(&mut idx, 4);
-        put(&mut idx, 4);
+        put(&mut idx, 0);
         put(&mut idx, 0);
         // End tag
         put(&mut idx, 0);

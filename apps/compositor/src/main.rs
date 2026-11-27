@@ -9,18 +9,18 @@
 //!   `640x452` surface `Shm` under the persistent top Status Bar.
 //! - Draws the top Status Bar (5-point Hollow Star, `Calibri` font, live board info,
 //!   audio volume/route, SoC temperature, clock, and `[F1]` quick help toggle).
-//! - Unifies input from `svc.kbd` (USB HID Boot Keyboard) and `svc.uart` (serial console).
+//! - Reads hardware keyboard input via `svc.kbd` (USB HID Boot Keyboard).
 //! - Orchestrates session transitions (`Setup.hsapp` -> `Launcher.hsapp` <-> apps).
 
 use libdelta_ui::delta_abi::{
     AudioPacket, DesktopPacket, FbPacket, IpcMessage, KbdPacket, KeyCode, MSG_AUDIO_PLAY_TONE,
     MSG_DESKTOP_ACK, MSG_DESKTOP_CONNECT, MSG_DESKTOP_EXIT_TO_SHELL, MSG_DESKTOP_LAUNCH,
     MSG_DESKTOP_POLL_KEY, MSG_DESKTOP_PRESENT, MSG_DESKTOP_REFRESH_CFG, MSG_FB_GET_INFO,
-    MSG_FB_PRESENT, MSG_KBD_ACK, MSG_KBD_READ, MSG_UART_READ, SVC_AUDIO, SVC_DESKTOP, SVC_FB,
-    SVC_KBD, SVC_UART, SVC_VFS, SysCaps, errno, pack_msg, unpack_msg,
+    MSG_FB_PRESENT, MSG_KBD_ACK, MSG_KBD_READ, SVC_AUDIO, SVC_DESKTOP, SVC_FB, SVC_KBD, SVC_UART,
+    SVC_VFS, SysCaps, errno, pack_msg, unpack_msg,
 };
 use libdelta_ui::gfx::{
-    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_H, APP_W, BAR_H, BG, CYAN, Canvas, FB_H, FB_W, MUTED,
+    ACCENT, ACCENT_AMBER, ACCENT_YELLOW, APP_H, APP_W, BAR_H, BG, CYAN, Canvas, FB_H, FB_W, MUTED,
     OK_GREEN, PANEL, PANEL_ALT, TEXT,
 };
 use libdelta_ui::{
@@ -59,16 +59,16 @@ fn delta_main() -> usize {
 
     let caps = libdelta::sys_caps().unwrap_or_else(|_| SysCaps::empty());
     let blur_shm = libdelta::shm_create(fb_bytes).ok();
-    let mut comp = CompositorState::new(uart, vfs, fb_port, fb_shm_id, audio, caps, blur_shm);
+    let mut comp = CompositorState::new(vfs, fb_port, fb_shm_id, audio, caps, blur_shm);
     comp.cfg.load_from_vfs(vfs);
     comp.temp_mc = query_soc_temp_mc(fb_port).unwrap_or(42_000);
 
     play_boot_chime(audio, comp.cfg.volume, comp.cfg.audio_route);
-    comp.present_splash(&mut fb_canvas, "Starting Hollow Star Desktop...");
+    comp.present_splash(&mut fb_canvas, "Starting Hollow Star Cyberdeck...");
 
     libdelta::print_via(
         uart,
-        "[el0/compositor] Desktop compositor ready (svc.desktop, USB HID + UART, Calibri UI).\n",
+        "[el0/compositor] Desktop compositor ready (svc.desktop, USB HID kbd, Calibri UI).\n",
     );
 
     let mut current_exec = [0u8; 64];
@@ -95,7 +95,6 @@ fn delta_main() -> usize {
         let mut next_exec = [0u8; 64];
         let mut next_len = copy_path(&mut next_exec, "/system/apps/Launcher.hsapp/exec");
         let mut next_arg = 0u64;
-        let mut exit_to_shell = false;
         let mut session_done = false;
         let mut child_shm: Option<(u64, usize)> = None;
         let mut msg = IpcMessage::new(0);
@@ -165,8 +164,9 @@ fn delta_main() -> usize {
                     session_done = true;
                 }
                 MSG_DESKTOP_EXIT_TO_SHELL => {
+                    next_len = copy_path(&mut next_exec, "/system/apps/Launcher.hsapp/exec");
+                    next_arg = 0;
                     reply_pkt_fn(msg.reply_port, &DesktopPacket::empty());
-                    exit_to_shell = true;
                     session_done = true;
                 }
                 _ => {
@@ -182,10 +182,6 @@ fn delta_main() -> usize {
         }
         let _ = libdelta::wait_pid(child_pid);
         comp.cfg.load_from_vfs(vfs);
-        if exit_to_shell {
-            comp.present_shell_handoff(&mut fb_canvas);
-            break;
-        }
         current_exec = next_exec;
         current_len = next_len;
         current_arg = next_arg;
@@ -199,7 +195,6 @@ fn delta_main() -> usize {
 }
 
 struct CompositorState {
-    uart: usize,
     _vfs: usize,
     fb_port: usize,
     fb_shm_id: u64,
@@ -211,15 +206,12 @@ struct CompositorState {
     temp_mc: u32,
     help_open: bool,
     boot_banner_sent: bool,
-    poll_ticks: u32,
-    sec_ticks: u32,
-    esc_stage: u8,
-    esc_idle: u8,
+    last_clock_ms: u64,
+    last_temp_ms: u64,
 }
 
 impl CompositorState {
     fn new(
-        uart: usize,
         vfs: usize,
         fb_port: usize,
         fb_shm_id: u64,
@@ -227,8 +219,8 @@ impl CompositorState {
         caps: SysCaps,
         blur_shm: Option<(u64, usize)>,
     ) -> Self {
+        let now = libdelta::uptime_ms();
         Self {
-            uart,
             _vfs: vfs,
             fb_port,
             fb_shm_id,
@@ -240,10 +232,8 @@ impl CompositorState {
             temp_mc: 42_000,
             help_open: false,
             boot_banner_sent: false,
-            poll_ticks: 0,
-            sec_ticks: 0,
-            esc_stage: 0,
-            esc_idle: 0,
+            last_clock_ms: now,
+            last_temp_ms: now,
         }
     }
 
@@ -277,96 +267,36 @@ impl CompositorState {
     fn present_splash(&self, fb_canvas: &mut Canvas, msg: &str) {
         fb_canvas.clear(BG);
         self.draw_status_bar(fb_canvas);
-        fb_canvas.draw_arc_star((FB_W / 2) as i32, 192, 24, ACCENT_BLUE, ACCENT_MAGENTA);
-        fb_canvas.fill_gradient_h(210, 226, 220, 2, ACCENT_BLUE, ACCENT_MAGENTA);
+        fb_canvas.draw_arc_star((FB_W / 2) as i32, 192, 24, ACCENT_YELLOW, ACCENT_AMBER);
+        fb_canvas.fill_gradient_h(210, 226, 220, 2, ACCENT_YELLOW, ACCENT_AMBER);
         fb_canvas.draw_text_centered((FB_W / 2) as i32, 244, msg, MUTED, 1);
         self.flush_fb(self.cfg.brightness);
     }
 
-    fn present_shell_handoff(&self, fb_canvas: &mut Canvas) {
-        let lang = self.cfg.lang;
-        fb_canvas.clear(BG);
-        self.draw_status_bar(fb_canvas);
-        if let Some(scratch) = self.blur_scratch() {
-            fb_canvas.blur_tinted(
-                Rect {
-                    x: 76,
-                    y: 130,
-                    w: 488,
-                    h: 200,
-                },
-                3,
-                PANEL,
-                160,
-                scratch,
-            );
-        }
-        fb_canvas.draw_arc_box(
-            76,
-            130,
-            488,
-            200,
-            ArcSharpStyle::modal(),
-            PANEL,
-            ACCENT_BLUE,
-            ACCENT_MAGENTA,
-        );
-        fb_canvas.draw_arc_star(106, 162, 11, ACCENT_BLUE, ACCENT_MAGENTA);
-        fb_canvas.draw_text(
-            128,
-            154,
-            tr(
-                lang,
-                "Interactive Shell Mode (delta>)",
-                "Tryb Konsoli Interaktywnej (delta>)",
-            ),
-            ACCENT,
-        );
-        fb_canvas.fill_gradient_h(96, 180, 448, 2, ACCENT_BLUE, ACCENT_MAGENTA);
-        fb_canvas.draw_text(
-            104,
-            196,
-            tr(
-                lang,
-                "Serial UART console is active in the host terminal.",
-                "Konsola szeregowa UART jest aktywna w oknie terminala.",
-            ),
-            TEXT,
-        );
-        fb_canvas.draw_text(
-            104,
-            226,
-            tr(
-                lang,
-                "You can also type 'gui' + Enter via USB keyboard right here",
-                "Możesz też wpisać 'gui' + Enter na klawiaturze USB tutaj",
-            ),
-            CYAN,
-        );
-        fb_canvas.draw_text(
-            104,
-            256,
-            tr(
-                lang,
-                "to reopen the Desktop, or use commands like df, ls, cat, uname.",
-                "aby wrócić do Pulpitu, lub używać komend w terminalu.",
-            ),
-            MUTED,
-        );
-        self.flush_fb(self.cfg.brightness);
-    }
-
     fn tick(&mut self, fb_canvas: &mut Canvas, child_shm: Option<(u64, usize)>) {
-        self.poll_ticks = self.poll_ticks.wrapping_add(1);
-        self.sec_ticks = self.sec_ticks.wrapping_add(1);
+        let now = libdelta::uptime_ms();
+        let mut dirty = false;
 
-        if self.sec_ticks >= 900 {
-            self.sec_ticks = 0;
+        if now.saturating_sub(self.last_clock_ms) >= 60_000 {
+            self.last_clock_ms = now;
             self.cfg.clock_mm = (self.cfg.clock_mm + 1) % 60;
             if self.cfg.clock_mm == 0 {
                 self.cfg.clock_hh = (self.cfg.clock_hh + 1) % 24;
             }
-            self.temp_mc = query_soc_temp_mc(self.fb_port).unwrap_or(self.temp_mc);
+            dirty = true;
+        }
+
+        if now.saturating_sub(self.last_temp_ms) >= 10_000 {
+            self.last_temp_ms = now;
+            if let Some(new_temp) = query_soc_temp_mc(self.fb_port)
+                && new_temp / 1000 != self.temp_mc / 1000
+            {
+                self.temp_mc = new_temp;
+                dirty = true;
+            }
+        }
+
+        if dirty {
             self.composite_and_present(fb_canvas, child_shm);
         }
     }
@@ -396,23 +326,23 @@ impl CompositorState {
             (BAR_H - 2) as i32,
             FB_W as i32,
             2,
-            ACCENT_BLUE,
-            ACCENT_MAGENTA,
+            ACCENT_YELLOW,
+            ACCENT_AMBER,
         );
 
-        c.draw_arc_star(15, 13, 9, ACCENT_BLUE, ACCENT_MAGENTA);
+        c.draw_arc_star(15, 13, 9, ACCENT_YELLOW, ACCENT_AMBER);
         c.draw_text(29, 6, "Hollow Star OS+", TEXT);
         c.draw_arc_box(
             148,
             4,
             82,
             19,
-            ArcSharpStyle::pda_tile(),
+            ArcSharpStyle::sharp(),
             PANEL_ALT,
-            ACCENT_BLUE,
-            ACCENT_MAGENTA,
+            ACCENT_YELLOW,
+            ACCENT_AMBER,
         );
-        c.draw_text_centered(189, 6, "CYBERDECK", ACCENT_BLUE, 1);
+        c.draw_text_centered(189, 6, "CYBERDECK", ACCENT_YELLOW, 1);
 
         let mut line = [0u8; 96];
         let mut w = BufWriter::new(&mut line);
@@ -469,8 +399,8 @@ impl CompositorState {
                 cur_h,
                 ArcSharpStyle::modal(),
                 PANEL,
-                ACCENT_BLUE,
-                ACCENT_MAGENTA,
+                ACCENT_YELLOW,
+                ACCENT_AMBER,
             );
             self.flush_fb(self.cfg.brightness);
             sleep_ms(12);
@@ -500,12 +430,12 @@ impl CompositorState {
             290,
             ArcSharpStyle::modal(),
             PANEL,
-            ACCENT_BLUE,
-            ACCENT_MAGENTA,
+            ACCENT_YELLOW,
+            ACCENT_AMBER,
         );
         c.fill_rect(82, 86, 476, 28, PANEL_ALT);
-        c.fill_gradient_h(82, 114, 476, 2, ACCENT_BLUE, ACCENT_MAGENTA);
-        c.draw_arc_star(96, 100, 8, ACCENT_BLUE, ACCENT_MAGENTA);
+        c.fill_gradient_h(82, 114, 476, 2, ACCENT_YELLOW, ACCENT_AMBER);
+        c.draw_arc_star(96, 100, 8, ACCENT_YELLOW, ACCENT_AMBER);
         c.draw_text(
             110,
             91,
@@ -570,7 +500,7 @@ impl CompositorState {
             OK_GREEN,
             1,
         );
-        c.draw_text_right(552, 340, "USB HID + UART", CYAN);
+        c.draw_text_right(552, 340, "USB HID Cyberdeck", CYAN);
     }
 
     fn poll_unified_key(
@@ -614,107 +544,7 @@ impl CompositorState {
                 }
             }
         }
-        self.poll_uart_key()
-    }
-
-    fn poll_uart_key(&mut self) -> Option<(KeyCode, u8)> {
-        let Some(b) = read_uart_byte(self.uart) else {
-            if self.esc_stage == 1 {
-                self.esc_idle += 1;
-                if self.esc_idle >= 3 {
-                    self.esc_stage = 0;
-                    self.esc_idle = 0;
-                    return Some((KeyCode::Esc, 0));
-                }
-            }
-            return None;
-        };
-        self.esc_idle = 0;
-
-        match self.esc_stage {
-            0 => match b {
-                0x1B => {
-                    self.esc_stage = 1;
-                    None
-                }
-                b'\r' | b'\n' => Some((KeyCode::Enter, 0)),
-                0x08 | 0x7F => Some((KeyCode::Backspace, 0)),
-                b'\t' => Some((KeyCode::Tab, 0)),
-                0x13 => Some((KeyCode::CtrlS, 0)),
-                0x11 => Some((KeyCode::CtrlQ, 0)),
-                0x0E => Some((KeyCode::CtrlN, 0)),
-                0x06 => Some((KeyCode::CtrlF, 0)),
-                0x03 => Some((KeyCode::CtrlC, 0)),
-                b if (0x20..=0x7E).contains(&b) => Some((KeyCode::Char, b)),
-                _ => None,
-            },
-            1 => {
-                if b == b'[' {
-                    self.esc_stage = 2;
-                    None
-                } else if b == b'O' {
-                    self.esc_stage = 3;
-                    None
-                } else {
-                    self.esc_stage = 0;
-                    Some((KeyCode::Esc, 0))
-                }
-            }
-            2 => {
-                self.esc_stage = 0;
-                match b {
-                    b'A' => Some((KeyCode::Up, 0)),
-                    b'B' => Some((KeyCode::Down, 0)),
-                    b'C' => Some((KeyCode::Right, 0)),
-                    b'D' => Some((KeyCode::Left, 0)),
-                    b'1'..=b'9' => {
-                        self.esc_stage = if b == b'1' { 4 } else { 5 };
-                        None
-                    }
-                    _ => Some((KeyCode::Esc, 0)),
-                }
-            }
-            3 => {
-                self.esc_stage = 0;
-                match b {
-                    b'P' => Some((KeyCode::F1, 0)),
-                    b'Q' => Some((KeyCode::F2, 0)),
-                    _ => None,
-                }
-            }
-            4 => {
-                if b == b'1' {
-                    self.esc_stage = 6;
-                    None
-                } else if b == b'2' {
-                    self.esc_stage = 7;
-                    None
-                } else {
-                    self.esc_stage = 0;
-                    None
-                }
-            }
-            6 => {
-                self.esc_stage = 0;
-                if b == b'~' {
-                    Some((KeyCode::F1, 0))
-                } else {
-                    None
-                }
-            }
-            7 => {
-                self.esc_stage = 0;
-                if b == b'~' {
-                    Some((KeyCode::F2, 0))
-                } else {
-                    None
-                }
-            }
-            _ => {
-                self.esc_stage = 0;
-                None
-            }
-        }
+        None
     }
 }
 
@@ -722,16 +552,6 @@ fn reply_pkt_fn(reply_port: u64, pkt: &DesktopPacket) {
     if reply_port != 0 {
         let reply = pack_msg(MSG_DESKTOP_ACK, pkt);
         let _ = libdelta::port_reply(reply_port as usize, &reply);
-    }
-}
-
-fn read_uart_byte(uart: usize) -> Option<u8> {
-    let req = IpcMessage::new(MSG_UART_READ);
-    let mut reply = IpcMessage::new(0);
-    if libdelta::port_call(uart, &req, &mut reply).is_ok() && reply.len > 0 {
-        Some(reply.data[0])
-    } else {
-        None
     }
 }
 

@@ -9,7 +9,7 @@
 use libdelta_ui::calibri::MONO_WIDTH;
 use libdelta_ui::delta_abi::{KeyCode, SVC_VFS, SysCaps, VfsPartitionStat};
 use libdelta_ui::gfx::{
-    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL,
+    ACCENT, ACCENT_AMBER, ACCENT_YELLOW, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL,
     PANEL_ALT, TEXT, WARN_RED,
 };
 use libdelta_ui::{ArcSharpStyle, BufWriter, DesktopClient, OsConfig, tr};
@@ -267,9 +267,87 @@ fn exec_term_cmd<'a>(
                 TEXT,
             );
             term.println_wrapped(
-                "  mkdir <dir>, rm <file>, df, sysinfo, uname, expand, run <elf>, exit",
+                "  mkdir <dir>, rm <file>, df, sysinfo, dkexstat, dylibs, uname",
                 TEXT,
             );
+            term.println_wrapped("  expand, run <elf>, exit", TEXT);
+        }
+        "dkexstat" => match libdelta::vfs_readdir(vfs, "/system/Library/Extensions", &mut io_buf) {
+            Ok(n) => {
+                if let Ok(listing) = core::str::from_utf8(&io_buf[..n]) {
+                    term.println_wrapped(
+                        "Loaded .dkex Extensions (/system/Library/Extensions):",
+                        ACCENT,
+                    );
+                    for line in listing.lines() {
+                        let name = line
+                            .trim()
+                            .trim_start_matches("[DIR]")
+                            .trim_start_matches("[APP]")
+                            .trim()
+                            .trim_end_matches('/');
+                        if name.ends_with(".dkex") {
+                            let mut pbuf = [0u8; 96];
+                            let mut pw = BufWriter::new(&mut pbuf);
+                            pw.str("/system/Library/Extensions/");
+                            pw.str(name);
+                            pw.str("/Info.plist");
+                            let mut plist_buf = [0u8; 512];
+                            let mut out = [0u8; 74];
+                            let mut ow = BufWriter::new(&mut out);
+                            ow.str(name);
+                            if let Ok(pn) =
+                                libdelta::vfs_read_file(vfs, pw.as_str(), &mut plist_buf)
+                                && let Ok(pstr) = core::str::from_utf8(&plist_buf[..pn])
+                            {
+                                if let Some(svc) =
+                                    libdelta::dyld::parse_plist_string(pstr, "DeltaService")
+                                {
+                                    ow.str(" -> ");
+                                    ow.str(svc);
+                                }
+                                if let Some(bid) =
+                                    libdelta::dyld::parse_plist_string(pstr, "CFBundleIdentifier")
+                                {
+                                    ow.str(" (");
+                                    ow.str(bid);
+                                    ow.str(")");
+                                }
+                            }
+                            term.println_wrapped(ow.as_str(), CYAN);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                term.println_wrapped("dkexstat: /system/Library/Extensions missing", WARN_RED)
+            }
+        },
+        "dylibs" => {
+            if let Ok(kit) = libdelta::dyld::Dylib::open(vfs, "/system/lib/libdelta_kit.dylib") {
+                // SAFETY: `delta_kit_abi_version` is `extern "C" fn() -> u32`.
+                let abi = unsafe { kit.call_u32("delta_kit_abi_version") }.unwrap_or(0);
+                let mut line = [0u8; 74];
+                let mut w = BufWriter::new(&mut line);
+                w.str("libdelta_kit.dylib: syms=");
+                w.u32(kit.symbol_count() as u32);
+                w.str(", bytes=");
+                w.u32(kit.mapped_bytes() as u32);
+                w.str(", abi=0x");
+                let hex = b"0123456789ABCDEF";
+                for sh in (0..8).rev() {
+                    let b = [hex[((abi >> (sh * 4)) & 0xF) as usize]];
+                    if let Ok(s) = core::str::from_utf8(&b) {
+                        w.str(s);
+                    }
+                }
+                term.println_wrapped(w.as_str(), OK_GREEN);
+            } else {
+                term.println_wrapped(
+                    "dylibs: failed to map /system/lib/libdelta_kit.dylib",
+                    WARN_RED,
+                );
+            }
         }
         "clear" | "cls" => {
             term.clear_lines();
@@ -411,8 +489,8 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
         34,
         ArcSharpStyle::cyberdeck_card(),
         PANEL,
-        ACCENT_BLUE,
-        ACCENT_MAGENTA,
+        ACCENT_YELLOW,
+        ACCENT_AMBER,
     );
     c.draw_text(
         24,
@@ -422,7 +500,7 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
             "Terminal Emulator (Monospace 8x14)",
             "Emulator Terminala (Monospace 8x14)",
         ),
-        ACCENT_BLUE,
+        ACCENT_YELLOW,
     );
     c.draw_text_right(
         (APP_W - 24) as i32,
@@ -431,8 +509,17 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
         MUTED,
     );
 
-    // Console body (lightened slate terminal surface matching #131926 theme)
-    c.draw_box(12, 48, (APP_W - 24) as i32, 368, 0x000F_1420, BORDER);
+    // Console body (sharp-cornered inner terminal frame matching #131926 theme)
+    c.draw_arc_box(
+        12,
+        48,
+        (APP_W - 24) as i32,
+        368,
+        ArcSharpStyle::sharp(),
+        0x000F_1420,
+        BORDER,
+        BORDER,
+    );
 
     let visible = term.count.min(VIEW_ROWS);
     let skip = term.count.saturating_sub(VIEW_ROWS);
@@ -448,13 +535,13 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
 
     // Active prompt line at bottom of terminal viewport
     c.fill_rect(14, 386, (APP_W - 28) as i32, 24, PANEL_ALT);
-    c.draw_mono_text(22, 391, "delta> ", ACCENT_BLUE);
+    c.draw_mono_text(22, 391, "delta> ", ACCENT_YELLOW);
     let input_str = core::str::from_utf8(&term.input[..term.input_len]).unwrap_or("");
     c.draw_mono_text(22 + 7 * MONO_WIDTH, 391, input_str, TEXT);
 
     if term.cursor_vis {
         let cur_x = 22 + (7 + term.input_len as i32) * MONO_WIDTH;
-        c.fill_rect(cur_x.min(610), 392, MONO_WIDTH - 1, 13, ACCENT_MAGENTA);
+        c.fill_rect(cur_x.min(610), 392, MONO_WIDTH - 1, 13, ACCENT_AMBER);
     }
 
     c.draw_text(

@@ -6,7 +6,7 @@
 
 use libdelta_ui::delta_abi::{KeyCode, SVC_VFS, SysCaps};
 use libdelta_ui::gfx::{
-    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL, TEXT,
+    ACCENT, ACCENT_AMBER, ACCENT_YELLOW, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL, TEXT,
 };
 use libdelta_ui::{ArcSharpStyle, BufWriter, DesktopClient, Lang, OsConfig, tr, wireless_enabled};
 
@@ -144,10 +144,10 @@ fn render_setup(
         412,
         ArcSharpStyle::modal(),
         PANEL,
-        ACCENT_BLUE,
-        ACCENT_MAGENTA,
+        ACCENT_YELLOW,
+        ACCENT_AMBER,
     );
-    c.draw_arc_star(56, 48, 13, ACCENT_BLUE, ACCENT_MAGENTA);
+    c.draw_arc_star(56, 48, 13, ACCENT_YELLOW, ACCENT_AMBER);
     c.draw_text_scaled(
         82,
         36,
@@ -165,13 +165,13 @@ fn render_setup(
     sw.str(tr(lang, "Step ", "Krok "));
     sw.u32((step + 1) as u32);
     sw.str(" / 3");
-    c.draw_text_right((APP_W - 42) as i32, 36, sw.as_str(), ACCENT_MAGENTA);
+    c.draw_text_right((APP_W - 42) as i32, 36, sw.as_str(), ACCENT_AMBER);
 
     // Progress bar across 3 steps
     for idx in 0..3i32 {
         let bx = 46 + idx * 184;
         if idx <= step as i32 {
-            c.fill_gradient_h(bx, 68, 174, 4, ACCENT_BLUE, ACCENT_MAGENTA);
+            c.fill_gradient_h(bx, 68, 174, 4, ACCENT_YELLOW, ACCENT_AMBER);
         } else {
             c.fill_rect(bx, 68, 174, 4, BORDER);
         }

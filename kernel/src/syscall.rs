@@ -1,16 +1,24 @@
 //! EL0 -> EL1 system call dispatcher (`SVC #0`).
 
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use delta_abi::{
     AudioMmioInfo, FbMmioInfo, IpcMessage, SdMmioInfo, SysCaps, SyscallId, UartMmioInfo,
     UsbMmioInfo, errno,
 };
-use hal_core::{InterruptController, PAGE_SIZE};
+use hal_core::{InterruptController, PAGE_SIZE, Timer};
 
 use crate::arch::exceptions::TrapFrame;
 use crate::mem::pmm;
-use crate::{arch, board, ipc, proc, sched, shm};
+use crate::{board, ipc, proc, sched, shm};
+
+static BOOT_CNT_START: AtomicU64 = AtomicU64::new(0);
+
+/// Records the ARM Generic Timer counter baseline at kernel boot for 1 ms `uptime_ms`.
+pub fn init_boot_counter() {
+    BOOT_CNT_START.store(board::timer_handle().counter(), Ordering::Release);
+}
 
 /// Dispatches an AArch64 `svc #0` call from EL0 using `x8` as syscall ID
 /// and `x0..x5` as arguments, returning the result value for `x0`.
@@ -54,7 +62,12 @@ pub fn dispatch(tf: &TrapFrame) -> isize {
             let pmm_stats = pmm::stats();
             caps.ram_total_bytes = (pmm_stats.total_ram_frames * PAGE_SIZE) as u64;
             caps.ram_free_bytes = (pmm_stats.free_frames * PAGE_SIZE) as u64;
-            caps.uptime_ms = arch::exceptions::timer_ticks() * 10;
+            let timer = board::timer_handle();
+            let freq = timer.frequency_hz().max(1);
+            let elapsed = timer
+                .counter()
+                .saturating_sub(BOOT_CNT_START.load(Ordering::Acquire));
+            caps.uptime_ms = ((u128::from(elapsed) * 1000) / u128::from(freq)) as u64;
             if let Some(info) = board::info() {
                 caps.cpu_count = info.cpu_count as u8;
                 caps.has_wifi = u8::from(info.has_wifi);
@@ -235,6 +248,14 @@ pub fn dispatch(tf: &TrapFrame) -> isize {
             Err(e) => e,
         },
         SyscallId::ShmUnmap => match shm::unmap(pid, a0 as u64) {
+            Ok(()) => 0,
+            Err(e) => e,
+        },
+        SyscallId::VmAllocate => match proc::vm_allocate(pid, ttbr0, a0) {
+            Ok(va) => va as isize,
+            Err(e) => e,
+        },
+        SyscallId::VmProtect => match proc::vm_protect(pid, ttbr0, a0, a1, a2) {
             Ok(()) => 0,
             Err(e) => e,
         },
