@@ -262,8 +262,8 @@ impl EmmcDriver {
             )?;
         }
 
-        // Switch to fast transfer clock.
-        self.set_clock(0x01);
+        // Switch to reliable transfer clock compatible with physical SD cards and QEMU.
+        self.set_clock(0x02);
         Ok(())
     }
 

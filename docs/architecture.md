@@ -20,7 +20,7 @@
 |              init, powłoka, usługi systemowe (/dev, /proc)            |
 +-----------------------------------------------------------------------+
 |  drivers/ & fs/   Serwery w przestrzeni użytkownika (EL0)             |
-|              drv-uart | drv-fb | drv-sd | drv-audio | VFS/FAT32/ext2  |
+|              drv-uart|drv-fb|drv-sd|drv-audio|drv-kbd|VFS/FAT32/DeltaFS|
 +=======================================================================+
 |              Granica wywołań systemowych (SVC EL0 -> EL1)             |
 +=======================================================================+
@@ -60,29 +60,37 @@
 Komunikacja między serwerami sterowników, systemami plików i aplikacjami opiera się na **portach komunikatów** (inspirowanych portami BeOS) połączonych z **prawami dostępu (capabilities)** (inspirowanymi seL4/Mach):
 
 1. **ABI wywołań systemowych (`userland/delta-abi`, `svc #0`):**
-   - `x8` = numer wywołania (`Exit=0`, `Yield=1`, `GetPid=2`, `SpawnElf=3`, `WaitPid=4`, `GetSysCaps=5`, `PortCreate=10`, `PortSend=11`, `PortRecv=12`, `PortCall=13`, `PortReply=14`, `ServiceRegister=20`, `ServiceLookup=21`, `GetUartMmioInfo=30`, `GetSdMmioInfo=31`, `IrqBind=32`, `IrqAck=33`, `GetFbMmioInfo=34`, `MapFbPhys=35`, `AllocDmaPage=36`, `GetAudioMmioInfo=37`, `ShmCreate=40`, `ShmAllowPort=41`, `ShmMap=42`, `ShmUnmap=43`), `x0..x5` = argumenty, `x0` = wynik / `-errno`.
+   - `x8` = numer wywołania (`Exit=0`, `Yield=1`, `GetPid=2`, `SpawnElf=3`, `WaitPid=4`, `GetSysCaps=5`, `PortCreate=10`, `PortSend=11`, `PortRecv=12`, `PortCall=13`, `PortReply=14`, `ServiceRegister=20`, `ServiceLookup=21`, `GetUartMmioInfo=30`, `GetSdMmioInfo=31`, `IrqBind=32`, `IrqAck=33`, `GetFbMmioInfo=34`, `MapFbPhys=35`, `AllocDmaPage=36`, `GetAudioMmioInfo=37`, `GetUsbMmioInfo=38`, `ShmCreate=40`, `ShmAllowPort=41`, `ShmMap=42`, `ShmUnmap=43`), `x0..x5` = argumenty, `x0` = wynik / `-errno`.
    - Jądro bezpiecznie waliduje wskaźniki z EL0 (`copy_from_user` / `copy_to_user`) w tablicach `TTBR0_EL1` przed dostępem z EL1.
 2. **Porty, Capabilities, Priority Inheritance i Pamięć Współdzielona (`kernel/src/ipc/`, `kernel/src/shm.rs`):**
    - Stałe 128-bajtowe komunikaty `IpcMessage` (`tag`, `sender_pid` nadawany przez jądro, `reply_port`, `len`, `data[96]`).
    - `PortCall` tworzy jednorazowy port odpowiedzi i automatycznie przekazuje jednorazową capability `SEND` odbiorcy w `PortRecv`, podnosząc priorytet serwera (Priority Inheritance) na czas obsługi żądania.
-   - Rejestr nazw usług (`svc.uart`, `svc.sd`, `svc.vfs`, `svc.fb`, `svc.audio`) wydaje klientom wyłącznie capability `SEND`.
-   - Obiekty pamięci współdzielonej `Shm` (do `1.25 MiB` na bufor) pozwalają na transfer dużych buforów blokowych, plików oraz bufora klatki `640x480x4` między procesami EL0 (z ochroną `PXN`/`UXN` i stronami strażniczymi).
-3. **Izolacja sterowników urządzeń w EL0 (`drv-uart`, `drv-sd`, `drv-fb`, `drv-audio`):**
+   - Rejestr nazw usług (`svc.uart`, `svc.sd`, `svc.vfs`, `svc.fb`, `svc.audio`, `svc.kbd`, `svc.desktop`) wydaje klientom wyłącznie capability `SEND`.
+   - Obiekty pamięci współdzielonej `Shm` (do `1.25 MiB` na bufor) pozwalają na transfer dużych buforów blokowych, plików oraz bufora klatki `640x480x4` między kompozytorem a aplikacjami EL0 (z ochroną `PXN`/`UXN` i stronami strażniczymi).
+3. **Izolacja sterowników urządzeń w EL0 (`drv-uart`, `drv-sd`, `drv-fb`, `drv-audio`, `drv-kbd`):**
    - `drv-uart` otrzymuje wyłącznie 4 KiB stronę MMIO UART (`Board::uart_mmio_region()`).
    - `drv-sd` otrzymuje 4 KiB stronę MMIO kontrolera Arasan EMMC + IRQ 62 (`Board::sd_mmio_region()`), obsługując odczyt rozmiaru karty (`CMD9` CSD).
    - `drv-fb` (`Priority::DISPLAY = 15`) otrzymuje stronę MMIO VideoCore Mailbox (`Board::mailbox_mmio_region()`), stronę DMA (`NormalNc`) oraz ograniczone okno VRAM (`Board::framebuffer_phys_window()`), udostępniając `640x480@32bpp` oraz odczyt temperatury SoC.
    - `drv-audio` działa na priorytecie **Real-Time (`Priority 110`)**, mieszając próbki audio bez przycięć pod obciążeniem UI i obsługując routing Jack 3.5 mm / HDMI (`Board::audio_mmio_region()`).
+   - `drv-kbd` otrzymuje wielostronicowe okno MMIO kontrolera Synopsys DWC2 USB Host (`Board::usb_mmio_region()`) oraz stronę DMA (`NormalNc`), obsługując klawiatury USB HID Boot bezpośrednio (QEMU `-device usb-kbd`, RPi Zero 2 W OTG) i przez hub USB (np. LAN9514 na Raspberry Pi 3B).
 4. **Serwer VFS i separacja 3 partycji (`fs/`, `vfsd`, `svc.vfs`):**
-   - Partycja 1 (`0x0C` **FAT32**) -> **`/boot`** (pliki startowe RPi: `config.txt`, `kernel8.img`, `README.TXT`).
-   - Partycja 2 (`0xDF` **DeltaFS**, `ROLE_SYSTEM`) -> **`/system`** (`/system/bin/shell.elf`, `/system/apps/Hello.hsapp/`, `/system/apps/HollowStar.hsapp/`).
+   - Partycja 1 (`0x0C` **FAT32/VFAT**) -> **`/boot`** (pliki startowe RPi: `bootcode.bin`, `start.elf`, `fixup.dat`, DTBs z długimi nazwami LFN, `config.txt`, `kernel8.img`).
+   - Partycja 2 (`0xDF` **DeltaFS**, `ROLE_SYSTEM`) -> **`/system`** (`/system/bin/shell.elf`, `/system/bin/compositor.elf`, `/system/apps/{Setup,Launcher,Terminal,Apps,Hello}.hsapp/`).
    - Partycja 3 (`0xDF` **DeltaFS**, `ROLE_USER`) -> **`/user`** (`/user/config/os.cfg`, `/user/notes/`, `/user/media/`, `/user/apps/`), z dziennikowaniem write-ahead log (**WAL**) oraz możliwością dynamicznego rozszerzania partycji do końca karty SD (`MSG_VFS_EXPAND_USER`).
    - Przestrzenie wirtualne `/dev` (`uart0`, `sd0`, `fb0`, `audio0`) oraz `/proc` (`/proc/version`, `/proc/mounts`, `/proc/partitions`).
 
 ---
 
-## 5. Format paczek aplikacji (`.hsapp`)
+## 5. Modularny Kompozytor Desktop (`svc.desktop`) i format paczek `.hsapp`
 
-Aplikacje w przestrzeni użytkownika (`apps/`) są dystrybuowane i uruchamiane jako samowystarczalne katalogi-paczki wzorowane na paczkach `.app` z systemu macOS:
+Zgodnie z architekturą mikrojądrową, warstwa graficzna została rozdzielona na niezależne procesy EL0 komunikujące się przez wspólną bibliotekę `userland/libdelta-ui` (czcionka proporcjonalna w stylu **Calibri** z polskimi znakami oraz czcionka **Monospace `8x14`** dla terminala) i protokół `svc.desktop`:
+- **Kompozytor (`apps/compositor` -> `/system/bin/compositor.elf`):** zarządza `svc.fb`, mapuje powierzchnię `Shm` `640x452` aktywnej aplikacji `.hsapp`, rysuje górny pasek statusu (`28px`), przechwytuje klawisze z USB HID (`svc.kbd`) i serial UART (`svc.uart`), obsługuje globalną nakładkę pomocy `F1` i przełącza aplikacje.
+- **`1st Setup` (`apps/setup` -> `/system/apps/Setup.hsapp/`):** osobny kreator startowy (`EN`/`PL` → zegar → podsumowanie sprzętu).
+- **App Launcher (`apps/launcher` -> `/system/apps/Launcher.hsapp/`):** osobna siatka `.hsapp` uruchamiająca poszczególne pakiety w izolowanych przestrzeniach `TTBR0`.
+- **Terminal Emulator (`apps/terminal` -> `/system/apps/Terminal.hsapp/`):** okienkowy emulator terminala z czcionką `8x14` monospace, historią poleceń i pełnym dostępem do komend VFS (`ls`, `cat`, `write`, `df`, `sysinfo`, `expand`, `run`, `exit`).
+- **Zestaw Narzędzi (`apps/hollow-star` -> `/system/apps/Apps.hsapp/`):** `Sys Info`, `Markdown Notes`, `File Explorer`, `Media Player RT`, `Calculator`, `Games`, `Settings`.
+
+Paczki aplikacji zachowują strukturę katalogową inspirowaną macOS:
 
 ```text
 <AppName>.hsapp/
@@ -90,9 +98,6 @@ Aplikacje w przestrzeni użytkownika (`apps/`) są dystrybuowane i uruchamiane j
 ├── exec          # Główny plik wykonywalny programu (binarka ELF AArch64 dla EL0)
 └── icon.png      # Ikona aplikacji wyświetlana przez launcher i eksplorator plików
 ```
-
-- **Uruchamianie (aktywne od M5–M6):** `/system/bin/shell.elf` oraz launcher graficzny `HollowStar.hsapp` uruchamiają paczki `.hsapp/exec` z partycji `/system` lub `/user` (`Hello.hsapp/exec`, `HollowStar.hsapp/exec`).
-- **Prezentacja w UI:** eksplorator plików oraz launcher oznaczają katalogi `.hsapp` własnym typem `KIND_HSAPP` / atrybutem `application/x-hsapp` w systemie DeltaFS.
 
 ---
 
@@ -105,5 +110,5 @@ Szczegółowy opis wszystkich kamieni milowych znajduje się w [docs/MILESTONES.
 - **M3 (Delta Scheduler & SMP) — ukończony:** przełączanie kontekstu AArch64 (`CpuContext`), wybudzenie wszystkich 4 rdzeni Cortex-A53 (`_start_secondary` + spin-table), kolejki priorytetowe `1..=120` z warstwą Real-Time i dziedziczeniem priorytetów.
 - **M4 (EL0 & IPC) — ukończony:** pełny higher-half kernel w `TTBR1_EL1`, izolowane przestrzenie `TTBR0_EL1` ładowane przez loader ELF64, ABI `svc #0`, porty IPC z capabilities i PI, proces `init` komunikujący się z serwerem `drv-uart` w EL0.
 - **M5 (Storage & VFS) — ukończony:** pamięć współdzielona `Shm`, IRQ forwarding do EL0, serwer SD/eMMC (`drv-sd`), serwer VFS (`fs/vfsd`), `SpawnElf`/`WaitPid`, interaktywna powłoka i pierwsza paczka `.hsapp`.
-- **M6 (Multimedia, DeltaFS & UI) — ukończony:** własny system plików **DeltaFS** (4 KiB bloki, CRC32, Write-Ahead Journal WAL, ekstenty, `KIND_HSAPP`, rozszerzanie partycji), rozdzielony układ **3 partycji** (`/boot` FAT32, `/system` DeltaFS, `/user` DeltaFS), `hal/board-raspi02w`, sterowniki EL0 `drv-fb` (VideoCore Mailbox `640x480@32bpp` + temperatura SoC) i `drv-audio` (Delta Priority `110` RT), oraz desktop `HollowStar.hsapp` (`1st Setup`, `EN`/`PL`, `F1` pomoc, `Sys Info`, `Markdown Notes`, `File Explorer`, `Media Player`, `Calculator`, gry, `Settings`).
+- **M6 (Multimedia, DeltaFS & UI) — ukończony (`v0.6.0-rc.2`):** własny system plików **DeltaFS**, układ **3 partycji**, `hal/board-raspi02w`, sterowniki EL0 `drv-fb` (naprawiony offset ekranu + macOS Cocoa `zoom-to-fit=on`), `drv-audio` (`RT 110`), `drv-kbd` (USB HID `DWC2` + obsługa hubów), modularny podział `compositor` / `Setup.hsapp` / `Launcher.hsapp` / `Terminal.hsapp` / `Apps.hsapp` z czcionką w stylu Calibri oraz lokalny builder obrazów sprzętowych `./build-test-image.sh` (`target/`).
 - **v1.0.0 — następny etap:** poradnik flashowania karty SD, scalenie `testing -> main`, tag `v1.0.0` i publikacja obrazów przez GitHub Releases.

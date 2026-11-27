@@ -1,0 +1,8 @@
+[package]
+name = "libdelta-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libdelta = { path = "../libdelta" }

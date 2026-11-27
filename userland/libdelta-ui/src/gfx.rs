@@ -1,12 +1,16 @@
-//! Sharp-edged retro pixel canvas (`640x480` XRGB8888) backed by `Shm` for zero-tearing present.
+//! Sharp-edged pixel canvas (`XRGB8888`) backed by `Shm` with Calibri & Monospace rendering.
 
-use crate::font::glyph_for;
+use crate::calibri::{FONT_HEIGHT, MONO_WIDTH, glyph_calibri, glyph_mono, measure_calibri};
 
-pub const SCREEN_W: usize = 640;
-pub const SCREEN_H: usize = 480;
+pub const FB_W: usize = 640;
+pub const FB_H: usize = 480;
+pub const BAR_H: usize = 28;
+pub const APP_W: usize = 640;
+pub const APP_H: usize = FB_H - BAR_H;
 
 pub const BG: u32 = 0x000A_0E14;
 pub const PANEL: u32 = 0x0012_1822;
+pub const PANEL_ALT: u32 = 0x0017_1F2C;
 pub const ACCENT: u32 = 0x00F4_B41A;
 pub const ACCENT_DIM: u32 = 0x008A_6510;
 pub const BORDER: u32 = 0x003D_4B60;
@@ -18,16 +22,27 @@ pub const CYAN: u32 = 0x0058_A6FF;
 
 pub struct Canvas {
     buf: &'static mut [u32],
+    pub width: usize,
+    pub height: usize,
 }
 
 impl Canvas {
+    /// Wraps a `Shm`-mapped pixel buffer of size `width * height` pixels.
+    ///
     /// # Safety
-    /// `shm_va` must map at least `SCREEN_W * SCREEN_H * 4` writable bytes for the lifetime of `Canvas`.
-    pub unsafe fn from_shm(shm_va: usize) -> Self {
-        // SAFETY: Caller guarantees exclusive mapped `Shm` pixel memory of size `SCREEN_W * SCREEN_H`.
-        let buf =
-            unsafe { core::slice::from_raw_parts_mut(shm_va as *mut u32, SCREEN_W * SCREEN_H) };
-        Self { buf }
+    /// `shm_va` must map at least `width * height * 4` writable bytes for the lifetime of `Canvas`.
+    pub unsafe fn from_shm(shm_va: usize, width: usize, height: usize) -> Self {
+        // SAFETY: Caller guarantees exclusive mapped `Shm` pixel memory of size `width * height`.
+        let buf = unsafe { core::slice::from_raw_parts_mut(shm_va as *mut u32, width * height) };
+        Self { buf, width, height }
+    }
+
+    pub fn pixels(&self) -> &[u32] {
+        self.buf
+    }
+
+    pub fn pixels_mut(&mut self) -> &mut [u32] {
+        self.buf
     }
 
     pub fn clear(&mut self, color: u32) {
@@ -36,18 +51,21 @@ impl Canvas {
 
     #[inline]
     pub fn put_px(&mut self, x: i32, y: i32, color: u32) {
-        if x >= 0 && y >= 0 && (x as usize) < SCREEN_W && (y as usize) < SCREEN_H {
-            self.buf[(y as usize) * SCREEN_W + (x as usize)] = color;
+        if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+            self.buf[(y as usize) * self.width + (x as usize)] = color;
         }
     }
 
     pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
         let x0 = x.max(0) as usize;
         let y0 = y.max(0) as usize;
-        let x1 = (x + w).min(SCREEN_W as i32).max(0) as usize;
-        let y1 = (y + h).min(SCREEN_H as i32).max(0) as usize;
+        let x1 = (x + w).min(self.width as i32).max(0) as usize;
+        let y1 = (y + h).min(self.height as i32).max(0) as usize;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
         for py in y0..y1 {
-            let row = py * SCREEN_W;
+            let row = py * self.width;
             self.buf[row + x0..row + x1].fill(color);
         }
     }
@@ -93,8 +111,7 @@ impl Canvas {
     /// Draws the 5-pointed **Hollow Star** emblem centered at `(cx, cy)`.
     pub fn draw_hollow_star(&mut self, cx: i32, cy: i32, r_outer: i32, color: u32) {
         let r_inner = (r_outer * 38) / 100;
-        // Fixed-point 10-vertex angles (cos*256, sin*256) starting from -90 deg (top point).
-        const PTS: [(i32, i32); 10] = [
+        const UNIT_10: [(i32, i32); 10] = [
             (0, -256),
             (150, -207),
             (243, -79),
@@ -105,34 +122,6 @@ impl Canvas {
             (-243, 79),
             (-243, -79),
             (-150, -207),
-        ];
-        // Even indices = outer radius, odd indices = inner radius; actually standard 5-star uses alternating vertices:
-        const STAR_VERTS: [(i32, i32); 10] = [
-            (0, -256),   // outer 0 (top)
-            (150, -207), // will be scaled with r_inner? Wait: 36 deg intervals!
-            (243, -79),  // outer 72 deg
-            (150, 207),  // wait: 108 deg
-            (0, 256),    // inner bottom
-            (0, 256),
-            (-150, 207),
-            (-243, -79),
-            (-243, -79),
-            (-150, -207),
-        ];
-        let _ = (PTS, STAR_VERTS);
-        // Exact 36-degree step unit vectors (scaled by 256):
-        // k=0: -90, k=1: -54, k=2: -18, k=3: +18, k=4: +54, k=5: +90, k=6: +126, k=7: +162, k=8: +198, k=9: +234
-        const UNIT_10: [(i32, i32); 10] = [
-            (0, -256),    // -90 deg (outer)
-            (150, -207),  // -54 deg (inner)
-            (243, -79),   // -18 deg (outer)
-            (243, 79),    // +18 deg (inner)
-            (150, 207),   // +54 deg (outer)
-            (0, 256),     // +90 deg (inner)
-            (-150, 207),  // +126 deg (outer)
-            (-243, 79),   // +162 deg (inner)
-            (-243, -79),  // +198 deg (outer)
-            (-150, -207), // +234 deg (inner)
         ];
         let mut coords = [(0i32, 0i32); 10];
         for i in 0..10 {
@@ -151,20 +140,25 @@ impl Canvas {
         }
     }
 
+    /// Draws text using the Calibri-inspired proportional font at `scale`.
     pub fn draw_text_scaled(&mut self, x: i32, y: i32, text: &str, color: u32, scale: i32) {
         let mut cx = x;
         let s = scale.max(1);
+        let max_x = self.width as i32 - 4;
         for ch in text.chars() {
-            let bits = glyph_for(ch);
-            for (row, &mask) in bits.iter().enumerate() {
-                for col in 0..8 {
-                    if (mask & (0x80 >> col)) != 0 {
+            let g = glyph_calibri(ch);
+            for (row, &mask) in g.rows.iter().enumerate() {
+                if mask == 0 {
+                    continue;
+                }
+                for col in 0..i32::from(g.width) {
+                    if (mask & (0x8000u16 >> col)) != 0 {
                         self.fill_rect(cx + col * s, y + (row as i32) * s, s, s, color);
                     }
                 }
             }
-            cx += 8 * s;
-            if cx >= SCREEN_W as i32 - 8 {
+            cx += i32::from(g.advance) * s;
+            if cx >= max_x {
                 break;
             }
         }
@@ -172,5 +166,47 @@ impl Canvas {
 
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, color: u32) {
         self.draw_text_scaled(x, y, text, color, 1);
+    }
+
+    pub fn draw_text_centered(&mut self, cx: i32, y: i32, text: &str, color: u32, scale: i32) {
+        let w = measure_calibri(text, scale);
+        self.draw_text_scaled(cx - w / 2, y, text, color, scale);
+    }
+
+    pub fn draw_text_right(&mut self, x_right: i32, y: i32, text: &str, color: u32) {
+        let w = measure_calibri(text, 1);
+        self.draw_text(x_right - w, y, text, color);
+    }
+
+    /// Draws a single fixed-width `8x14` monospace character at `(x, y)`.
+    pub fn draw_mono_char(&mut self, x: i32, y: i32, ch: char, color: u32) {
+        let rows = glyph_mono(ch);
+        for (r, &mask) in rows.iter().enumerate() {
+            if mask == 0 {
+                continue;
+            }
+            for c in 0..8 {
+                if (mask & (0x80 >> c)) != 0 {
+                    self.put_px(x + c, y + r as i32, color);
+                }
+            }
+        }
+    }
+
+    /// Draws a line of fixed-width `8x14` monospace text (for Terminal Emulator & hex tables).
+    pub fn draw_mono_text(&mut self, x: i32, y: i32, text: &str, color: u32) {
+        let mut cx = x;
+        let max_x = self.width as i32 - MONO_WIDTH;
+        for ch in text.chars() {
+            if cx > max_x {
+                break;
+            }
+            self.draw_mono_char(cx, y, ch, color);
+            cx += MONO_WIDTH;
+        }
+    }
+
+    pub const fn text_height() -> i32 {
+        FONT_HEIGHT
     }
 }

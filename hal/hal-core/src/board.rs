@@ -85,6 +85,12 @@ pub trait Board {
         None
     }
 
+    /// Returns `(mmio_region, irq_num)` for the USB Host controller (`DWC2`) so `drv-kbd`
+    /// can enumerate USB HID keyboards in EL0.
+    fn usb_mmio_region(&self) -> Option<(MemoryRegion, u32)> {
+        None
+    }
+
     /// Wakes secondary CPU core `core_id` (`1..cpu_count`) to begin executing at
     /// physical address `entry_phys`.
     fn wake_secondary_core(&self, core_id: usize, entry_phys: usize) -> Result<(), SmpError>;

@@ -12,6 +12,10 @@ pub const SVC_VFS: &str = "svc.vfs";
 pub const SVC_FB: &str = "svc.fb";
 /// Service name registered by the userspace Real-Time audio server (`drv-audio`).
 pub const SVC_AUDIO: &str = "svc.audio";
+/// Service name registered by the userspace USB HID keyboard driver (`drv-kbd`).
+pub const SVC_KBD: &str = "svc.kbd";
+/// Service name registered by the modular EL0 Desktop Window Compositor (`compositor`).
+pub const SVC_DESKTOP: &str = "svc.desktop";
 
 /// IPC message tag asking `drv-uart` to write payload bytes to the serial console.
 pub const MSG_UART_WRITE: u64 = 1;
@@ -54,6 +58,19 @@ pub const MSG_AUDIO_STATUS: u64 = 0x505;
 pub const MSG_AUDIO_PLAY_PCM_SHM: u64 = 0x506;
 pub const MSG_AUDIO_ACK: u64 = 0x5FF;
 
+/// USB HID keyboard server IPC opcodes (`svc.kbd`).
+pub const MSG_KBD_READ: u64 = 0x601;
+pub const MSG_KBD_ACK: u64 = 0x6FF;
+
+/// Desktop Compositor IPC opcodes (`svc.desktop`).
+pub const MSG_DESKTOP_CONNECT: u64 = 0x701;
+pub const MSG_DESKTOP_PRESENT: u64 = 0x702;
+pub const MSG_DESKTOP_POLL_KEY: u64 = 0x703;
+pub const MSG_DESKTOP_LAUNCH: u64 = 0x704;
+pub const MSG_DESKTOP_EXIT_TO_SHELL: u64 = 0x705;
+pub const MSG_DESKTOP_REFRESH_CFG: u64 = 0x706;
+pub const MSG_DESKTOP_ACK: u64 = 0x7FF;
+
 /// Maximum inline payload size inside [`IpcMessage`].
 pub const IPC_MAX_DATA: usize = 96;
 
@@ -85,6 +102,7 @@ pub enum SyscallId {
     MapFbPhys = 35,
     AllocDmaPage = 36,
     GetAudioMmioInfo = 37,
+    GetUsbMmioInfo = 38,
     ShmCreate = 40,
     ShmAllowPort = 41,
     ShmMap = 42,
@@ -116,6 +134,7 @@ impl SyscallId {
             35 => Some(Self::MapFbPhys),
             36 => Some(Self::AllocDmaPage),
             37 => Some(Self::GetAudioMmioInfo),
+            38 => Some(Self::GetUsbMmioInfo),
             40 => Some(Self::ShmCreate),
             41 => Some(Self::ShmAllowPort),
             42 => Some(Self::ShmMap),
@@ -279,6 +298,121 @@ pub struct DmaPageInfo {
 #[derive(Clone, Copy)]
 pub struct AudioMmioInfo {
     pub virt_base: usize,
+}
+
+/// USB Host (`DWC2`) MMIO + IRQ capability returned to `drv-kbd`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UsbMmioInfo {
+    pub virt_base: usize,
+    pub irq_num: u32,
+    pub _pad: u32,
+}
+
+/// Normalized keyboard event code used across `drv-kbd`, `compositor`, and `.hsapp` clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KeyCode {
+    None = 0,
+    Char = 1,
+    Enter = 2,
+    Backspace = 3,
+    Tab = 4,
+    Esc = 5,
+    Up = 6,
+    Down = 7,
+    Left = 8,
+    Right = 9,
+    F1 = 10,
+    F2 = 11,
+    CtrlS = 12,
+    CtrlQ = 13,
+    CtrlC = 14,
+    CtrlN = 15,
+    CtrlF = 16,
+}
+
+impl KeyCode {
+    pub const fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Char,
+            2 => Self::Enter,
+            3 => Self::Backspace,
+            4 => Self::Tab,
+            5 => Self::Esc,
+            6 => Self::Up,
+            7 => Self::Down,
+            8 => Self::Left,
+            9 => Self::Right,
+            10 => Self::F1,
+            11 => Self::F2,
+            12 => Self::CtrlS,
+            13 => Self::CtrlQ,
+            14 => Self::CtrlC,
+            15 => Self::CtrlN,
+            16 => Self::CtrlF,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Single keyboard event packet returned by `svc.kbd` (`MSG_KBD_READ`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KbdPacket {
+    pub kind: u8,
+    pub ch: u8,
+    pub _pad: [u8; 2],
+}
+
+const _: () = assert!(core::mem::size_of::<KbdPacket>() <= IPC_MAX_DATA);
+
+/// Desktop Compositor IPC request/reply payload (`svc.desktop`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DesktopPacket {
+    pub shm_id: u64,
+    pub arg: u64,
+    pub width: u32,
+    pub height: u32,
+    pub key_kind: u8,
+    pub key_ch: u8,
+    pub text_len: u8,
+    pub reserved: u8,
+    pub status: i32,
+    pub text: [u8; 64],
+}
+
+const _: () = assert!(core::mem::size_of::<DesktopPacket>() <= IPC_MAX_DATA);
+
+impl DesktopPacket {
+    pub fn empty() -> Self {
+        Self {
+            shm_id: 0,
+            arg: 0,
+            width: 0,
+            height: 0,
+            key_kind: 0,
+            key_ch: 0,
+            text_len: 0,
+            reserved: 0,
+            status: 0,
+            text: [0; 64],
+        }
+    }
+
+    pub fn with_text(s: &[u8]) -> Self {
+        let mut p = Self::empty();
+        let n = s.len().min(64);
+        p.text[..n].copy_from_slice(&s[..n]);
+        p.text_len = n as u8;
+        p
+    }
+
+    pub fn text_str(&self) -> &str {
+        let n = (self.text_len as usize).min(64);
+        core::str::from_utf8(&self.text[..n]).unwrap_or("")
+    }
 }
 
 /// Display status/present payload packed into [`IpcMessage::data`] for `svc.fb`.

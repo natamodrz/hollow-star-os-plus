@@ -1,0 +1,16 @@
+[package]
+name = "launcher-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hollow Star OS+ Modular .hsapp Grid Launcher (.hsapp)"
+
+[[bin]]
+name = "launcher"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }
+libdelta-ui = { path = "../../userland/libdelta-ui" }

@@ -13,7 +13,7 @@ SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-10}"       # maks. czas oczekiwania w sekundach
 EXPECT_MARKER="${EXPECT_MARKER:-Milestone M6}"
 
 # Lista crate'ów niezależnych od sprzętu, dla których odpalamy unit testy na hoście (macOS/Linux)
-HOST_TEST_PKGS="${HOST_TEST_PKGS:-hal-core vfs-server}"
+HOST_TEST_PKGS="${HOST_TEST_PKGS:-hal-core vfs-server libdelta-ui}"
 
 BUILD_DIR="target/$TARGET/$PROFILE"
 KERNEL_ELF="$BUILD_DIR/$KERNEL_PKG"
@@ -51,12 +51,13 @@ qemu_uart_args() {
 
 build_sdcard_img() {
   if [ -f "tools/mk_sdcard.py" ]; then
-    local shell_elf="target/userland/$TARGET/release/shell"
-    local hello_elf="target/userland/$TARGET/release/hello"
-    local hollow_elf="target/userland/$TARGET/release/hollow-star"
-    if [ -f "$shell_elf" ] && [ -f "$hello_elf" ] && [ -f "$hollow_elf" ]; then
+    local userland_dir="target/userland/$TARGET/release"
+    if [ -f "$userland_dir/shell" ] && [ -f "$userland_dir/compositor" ] \
+       && [ -f "$userland_dir/setup" ] && [ -f "$userland_dir/launcher" ] \
+       && [ -f "$userland_dir/terminal" ] && [ -f "$userland_dir/hollow-star" ] \
+       && [ -f "$userland_dir/hello" ]; then
       info "Tworzenie obrazu karty SD ($SD_IMG: /boot FAT32 + /system DeltaFS + /user DeltaFS + .hsapp)..."
-      python3 tools/mk_sdcard.py "$shell_elf" "$hello_elf" "$hollow_elf" "$SD_IMG"
+      python3 tools/mk_sdcard.py "$userland_dir" "$SD_IMG"
     fi
   fi
 }
@@ -134,6 +135,7 @@ cmd_run() {
   qemu-system-aarch64 \
     -M raspi3b \
     -display "$QEMU_DISPLAY" \
+    -usb -device usb-kbd \
     $(qemu_uart_args) \
     $(qemu_sd_args) \
     -kernel "$KERNEL_IMG"
@@ -146,6 +148,7 @@ cmd_gdb() {
   qemu-system-aarch64 \
     -M raspi3b \
     -display "$QEMU_DISPLAY" \
+    -usb -device usb-kbd \
     $(qemu_uart_args) \
     $(qemu_sd_args) \
     -kernel "$KERNEL_IMG" \
@@ -167,6 +170,7 @@ cmd_smoke() {
   qemu-system-aarch64 \
     -M raspi3b \
     -display "$QEMU_DISPLAY" \
+    -usb -device usb-kbd \
     $(qemu_uart_args) \
     $(qemu_sd_args) \
     -kernel "$KERNEL_IMG" \

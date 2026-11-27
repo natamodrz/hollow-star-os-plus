@@ -1,7 +1,7 @@
-//! Classic retro games (`Brick Breaker`, `Tetris`, `Racing`) rendered on the `640x480` Canvas.
+//! Classic retro games (`Brick Breaker`, `Tetris`, `Racing`) rendered in `640x452` app surface.
 
-use crate::gfx::{self, Canvas};
-use crate::i18n::{BufWriter, Lang, tr};
+use libdelta_ui::gfx::{self, APP_W, Canvas};
+use libdelta_ui::{BufWriter, Lang, tr};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GameId {
@@ -51,7 +51,7 @@ impl GameState {
             game_over: false,
             paddle_x: 280,
             ball_x: 320,
-            ball_y: 340,
+            ball_y: 310,
             ball_vx: 3,
             ball_vy: -3,
             bricks: [[true; 10]; 4],
@@ -62,7 +62,7 @@ impl GameState {
             tick_ctr: 0,
             car_lane: 1,
             obs_lane: 0,
-            obs_y: 80,
+            obs_y: 66,
             rng: 0x1234_5678,
         }
     }
@@ -121,17 +121,17 @@ impl GameState {
         if self.ball_x <= 64 || self.ball_x >= 568 {
             self.ball_vx = -self.ball_vx;
         }
-        if self.ball_y <= 88 {
+        if self.ball_y <= 64 {
             self.ball_vy = self.ball_vy.abs();
         }
-        if self.ball_y >= 410
-            && self.ball_y <= 424
+        if self.ball_y >= 384
+            && self.ball_y <= 398
             && self.ball_x >= self.paddle_x
             && self.ball_x <= self.paddle_x + 64
         {
             self.ball_vy = -self.ball_vy.abs();
         }
-        if self.ball_y > 440 {
+        if self.ball_y > 416 {
             self.game_over = true;
             return;
         }
@@ -141,7 +141,7 @@ impl GameState {
                     continue;
                 }
                 let bx = 70 + (col as i32) * 50;
-                let by = 104 + (row as i32) * 20;
+                let by = 80 + (row as i32) * 20;
                 if self.ball_x >= bx
                     && self.ball_x <= bx + 46
                     && self.ball_y >= by
@@ -167,7 +167,6 @@ impl GameState {
                 self.game_over = true;
                 return;
             }
-            // Clear filled rows
             for r in 0..16 {
                 if self.board[r].iter().all(|&c| c != 0) {
                     for rr in (1..=r).rev() {
@@ -188,18 +187,18 @@ impl GameState {
 
     fn step_racing(&mut self) {
         self.obs_y += 6;
-        if self.obs_y > 430 {
-            self.obs_y = 88;
+        if self.obs_y > 400 {
+            self.obs_y = 66;
             self.obs_lane = (self.next_rand() % 3) as i32;
             self.score += 15;
         }
-        if self.obs_y >= 360 && self.obs_y <= 406 && self.obs_lane == self.car_lane {
+        if self.obs_y >= 332 && self.obs_y <= 378 && self.obs_lane == self.car_lane {
             self.game_over = true;
         }
     }
 
     pub fn draw(&self, canvas: &mut Canvas, lang: Lang, high_score: u32) {
-        canvas.draw_box(50, 52, 540, 404, gfx::PANEL, gfx::BORDER);
+        canvas.draw_box(36, 16, (APP_W - 72) as i32, 416, gfx::PANEL, gfx::BORDER);
 
         let mut hdr = [0u8; 64];
         let mut w = BufWriter::new(&mut hdr);
@@ -215,7 +214,8 @@ impl GameState {
         w.str("  ");
         w.str(tr(lang, "Best: ", "Rekord: "));
         w.u32(high_score.max(self.score));
-        canvas.draw_text(68, 64, w.as_str(), gfx::ACCENT);
+        canvas.draw_text(52, 28, w.as_str(), gfx::ACCENT);
+        canvas.draw_text_right((APP_W - 52) as i32, 28, "[Esc] Back", gfx::MUTED);
 
         match self.active {
             GameId::Brick => {
@@ -225,7 +225,7 @@ impl GameState {
                         if alive {
                             canvas.fill_rect(
                                 70 + (col as i32) * 50,
-                                104 + (row as i32) * 20,
+                                80 + (row as i32) * 20,
                                 46,
                                 14,
                                 row_color,
@@ -233,18 +233,18 @@ impl GameState {
                         }
                     }
                 }
-                canvas.fill_rect(self.paddle_x, 418, 64, 10, gfx::TEXT);
+                canvas.fill_rect(self.paddle_x, 392, 64, 10, gfx::TEXT);
                 canvas.fill_rect(self.ball_x, self.ball_y, 8, 8, gfx::ACCENT);
             }
             GameId::Tetris => {
-                canvas.draw_box(218, 94, 204, 324, gfx::BG, gfx::BORDER);
+                canvas.draw_box(218, 66, 204, 324, gfx::BG, gfx::BORDER);
                 let palette = [gfx::BORDER, gfx::CYAN, gfx::ACCENT, gfx::OK_GREEN];
                 for (r, row_cells) in self.board.iter().enumerate() {
                     for (c, &cell) in row_cells.iter().enumerate() {
                         if cell != 0 {
                             canvas.fill_rect(
                                 220 + (c as i32) * 20,
-                                96 + (r as i32) * 20,
+                                68 + (r as i32) * 20,
                                 18,
                                 18,
                                 palette[usize::from(cell).min(3)],
@@ -253,38 +253,39 @@ impl GameState {
                     }
                 }
                 let pc = palette[usize::from(self.piece_kind + 1).min(3)];
-                canvas.fill_rect(220 + self.piece_x * 20, 96 + self.piece_y * 20, 18, 18, pc);
+                canvas.fill_rect(220 + self.piece_x * 20, 68 + self.piece_y * 20, 18, 18, pc);
                 canvas.fill_rect(
                     220 + (self.piece_x + 1) * 20,
-                    96 + self.piece_y * 20,
+                    68 + self.piece_y * 20,
                     18,
                     18,
                     pc,
                 );
             }
             GameId::Racing => {
-                canvas.draw_box(190, 88, 260, 350, gfx::BG, gfx::BORDER);
-                canvas.fill_rect(276, 88, 2, 350, gfx::BORDER);
-                canvas.fill_rect(362, 88, 2, 350, gfx::BORDER);
+                canvas.draw_box(190, 62, 260, 344, gfx::BG, gfx::BORDER);
+                canvas.fill_rect(276, 62, 2, 344, gfx::BORDER);
+                canvas.fill_rect(362, 62, 2, 344, gfx::BORDER);
                 let obs_x = 212 + self.obs_lane * 86;
                 canvas.fill_rect(obs_x, self.obs_y, 40, 32, gfx::WARN_RED);
                 let car_x = 212 + self.car_lane * 86;
-                canvas.fill_rect(car_x, 380, 40, 36, gfx::OK_GREEN);
+                canvas.fill_rect(car_x, 352, 40, 36, gfx::OK_GREEN);
             }
         }
 
         if self.game_over {
-            canvas.draw_box(170, 210, 300, 74, gfx::BG, gfx::WARN_RED);
-            canvas.draw_text_scaled(220, 224, "GAME OVER", gfx::WARN_RED, 2);
-            canvas.draw_text(
-                194,
-                256,
+            canvas.draw_box(170, 190, 300, 74, gfx::BG, gfx::WARN_RED);
+            canvas.draw_text_centered(320, 204, "GAME OVER", gfx::WARN_RED, 2);
+            canvas.draw_text_centered(
+                320,
+                238,
                 tr(
                     lang,
                     "[Space/Enter] Retry  [Esc] Menu",
                     "[Spacja/Enter] Od nowa  [Esc] Menu",
                 ),
                 gfx::TEXT,
+                1,
             );
         }
     }

@@ -76,21 +76,22 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 
 ---
 
-### M6 — Multimedia, DeltaFS & UI *(Ukończony — `v0.6.0-rc.1`)*
+### M6 — Multimedia, DeltaFS & UI *(Ukończony — `v0.6.0-rc.2`)*
 - **Zakres:**
   - **System plików DeltaFS (`fs/src/deltafs.rs`) + separacja 3 partycji (`tools/mk_sdcard.py`):**
-    - Partycja 1 (`0x0C` FAT32) → `/boot` (pliki startowe RPi); Partycja 2 (`0xDF` DeltaFS) → `/system` (`/system/bin/shell.elf`, `/system/apps/*.hsapp`); Partycja 3 (`0xDF` DeltaFS) → `/user` (konfiguracja `os.cfg`, notatki `.md`, media, dane użytkownika).
+    - Partycja 1 (`0x0C` FAT32/VFAT z LFN) → `/boot` (firmware RPi + DTBs + `config.txt` + `kernel8.img`); Partycja 2 (`0xDF` DeltaFS) → `/system` (`/system/bin/{shell,compositor}.elf`, `/system/apps/*.hsapp`); Partycja 3 (`0xDF` DeltaFS) → `/user` (konfiguracja `os.cfg`, notatki `.md`, media, dane użytkownika).
     - DeltaFS v1 z blokami `4 KiB`, sumą CRC32, ekstensjami, atrybutami inspirowanymi BeOS BFS (`KIND_HSAPP`), dziennikiem Write-Ahead Log (WAL z automatycznym odtwarzaniem po awarii przy montowaniu) oraz dynamicznym rozszerzaniem `/user` do końca karty SD (`expand_to_blocks` + aktualizacja MBR).
-  - **Wyświetlacz i dźwięk czasu rzeczywistego (`drivers/drv-fb`, `drivers/drv-audio`):**
-    - `drv-fb` (`Priority::DISPLAY = 15`) inicjuje framebuffer `640x480@32bpp` przez VideoCore Mailbox, mapuje VRAM jako `NormalNc`, odczytuje temperaturę SoC i prezentuje klatki z `Shm` z regulacją jasności.
+  - **Wyświetlacz, wejście USB HID i dźwięk czasu rzeczywistego (`drivers/drv-fb`, `drivers/drv-kbd`, `drivers/drv-audio`):**
+    - `drv-fb` (`Priority::DISPLAY = 15`) inicjuje framebuffer `640x480@32bpp` (`TAG_SET_VIRTUAL_OFFSET(0,0)`), mapuje VRAM jako `NormalNc`, odczytuje temperaturę SoC i prezentuje klatki z `Shm` z regulacją jasności (`cocoa,zoom-to-fit=on` na macOS).
+    - `drv-kbd` (`svc.kbd`, `GetUsbMmioInfo=38`) implementuje sterownik kontrolera USB DWC2 w EL0 (DMA + skanowanie portów hubów takich jak LAN9514 i QEMU `-device usb-kbd`), umożliwiając pełną nawigację klawiaturą w oknie QEMU oraz na fizycznym Raspberry Pi.
     - `drv-audio` działa na priorytecie **Real-Time (`110`)**, mieszając dźwięk i obsługując routing Jack 3.5 mm / HDMI oraz głośność `0–100%`.
   - **HAL dla Zero 2 W i adaptacja funkcji (`hal/board-raspi02w`):**
     - Dodano crate `board-raspi02w` współdzielący prymitywy BCM2837/RP3A0 z `board-raspi3b` oraz syscall `GetSysCaps`, dzięki czemu UI automatycznie ukrywa kontrolki Wi-Fi/BT/FTP, gdy moduł radiowy/sterownik jest niedostępny.
-  - **Launcher 2D, Desktop i Aplikacje (`apps/hollow-star` -> `HollowStar.hsapp/exec`) + Skrypt RC1 (`test-rc1.sh`):**
-    - Graficzny **Launcher (.hsapp Grid)** z pikselowymi ikonami `16x16` (`icons.rs`), dynamicznym skanowaniem `/system/apps` i `/user/apps` oraz bezpośrednim uruchamianiem paczek `.hsapp` (np. `Hello.hsapp`).
-    - Kreator `1st Setup` (`EN`/`PL` → automatyczne pominięcie Wi-Fi przy braku sterownika → zegar → ekran powitalny z 5-ramienną gwiazdą Hollow Star i zapisem w `/user/config/os.cfg`), uniwersalna pomoc `F1`, `Sys Info` (temperatura, RAM, 3 partycje + rozszerzanie `/user`), `Markdown Notes` (`Ctrl+S` + `Tab` podgląd), `File Explorer`, `Media Player` (Delta RT Audio), `Calculator` (`^`, `sqrt`, `F2` ułamki), klasyczne gry (`Brick Breaker`, `Tetris`, `Racing`) i `Settings`.
-    - Skrypt `./test-rc1.sh` (`--auto` oraz `--gui`) sprawdzający grafikę (VideoCore FB), dźwięk RT (`usb-audio`/`CoreAudio`), sieć (`usb-net` + SLIRP), partycje DeltaFS i App Launcher.
-- **Kryterium akceptacji:** zaliczone `./delta.sh ci` (`hal-core` 6 testów + `vfs-server` 2 testy z testem WAL replay i rozszerzania `/user` + `board-raspi02w` clippy), `./test-rc1.sh --auto` (grafika `640x480`, RT audio, `usb-net`, 3 partycje DeltaFS, Launcher uruchamiający `Hello.hsapp/exec`) oraz powrót do interaktywnej powłoki.
+  - **Modularny Desktop, Czcionka Calibri i Aplikacje (`libdelta-ui`, `compositor`, `Setup`, `Launcher`, `Terminal`, `Apps`) + Builder Obrazów Sprzętowych (`build-test-image.sh`):**
+    - **Modularna separacja procesów EL0:** oddzielny kompozytor `/system/bin/compositor.elf` (`svc.desktop` + wspólny pasek statusu + `F1` help), `Setup.hsapp`, `Launcher.hsapp`, graficzny **Terminal Emulator** (`Terminal.hsapp`), `Apps.hsapp` (`Sys Info`, `Markdown Notes`, `File Explorer`, `Media Player RT`, `Calculator`, gry, `Settings`) oraz `Hello.hsapp`.
+    - **Typografia (`userland/libdelta-ui`):** oryginalna proporcjonalna czcionka humanistyczna w stylu **Calibri** (z polskimi znakami `ą ć ę ł ń ó ś ź ż`) dla interfejsu oraz czcionka **Monospace `8x14`** dla `Terminal.hsapp`.
+    - **Skrypty testowe i obrazów sprzętowych:** `./test-rc1.sh` (`--auto`/`--gui` testujące USB HID `send-key`, FB `screendump`, Audio RT WAV/CoreAudio, `usb-net`, DeltaFS i modularny Launcher) oraz `./build-test-image.sh` + `tools/mk_hw_image.py` generujące lokalnie w `target/` gotowe do zapisu na kartę microSD obrazy testowe dla `raspi3b` i `raspi02w` (bez tworzenia katalogu `releases/` ani GitHub Releases).
+- **Kryterium akceptacji:** zaliczone `./delta.sh ci` (`hal-core` 6 testów + `vfs-server` 2 testy + `libdelta-ui` testy czcionki Calibri/Mono + `board-raspi02w`), `./test-rc1.sh --auto` (grafika `640x480`, nawigacja USB HID `drv-kbd`, `Terminal.hsapp`, RT audio, `usb-net`, 3 partycje DeltaFS, Launcher) oraz weryfikacja wygenerowanego obrazu sprzętowego `128 MiB`.
 
 ---
 

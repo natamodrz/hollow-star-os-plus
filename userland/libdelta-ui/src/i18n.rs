@@ -1,6 +1,6 @@
 //! Bilingual localization (`English` default + `Polski`) and `/user/config/os.cfg` persistence.
 
-use libdelta::delta_abi::SysCaps;
+use crate::delta_abi::SysCaps;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Lang {

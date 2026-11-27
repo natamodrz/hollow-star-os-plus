@@ -1,13 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-# Hollow Star OS+ — Interactive Graphical QEMU Runner (Graphics + Keyboard + Audio + USB-Net)
+# Hollow Star OS+ — Interactive Graphical QEMU Runner (Graphics + USB Keyboard + Audio + USB-Net)
 # Usage:
 #   ./run-gui.sh             Build release image and open QEMU graphics window
 #   PROFILE=debug ./run-gui.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+export PATH="/Users/nataniel/.cargo/bin:/opt/homebrew/bin:$PATH"
 
 PROFILE="${PROFILE:-release}"
 KERNEL_IMG="target/kernel8.img"
@@ -24,21 +26,23 @@ PROFILE="$PROFILE" ./delta.sh build >/dev/null
 DISPLAY_DRV="default"
 AUDIO_DRV="none"
 if [ "$(uname -s)" = "Darwin" ]; then
-  DISPLAY_DRV="cocoa"
+  # `zoom-to-fit=on` prevents macOS Cocoa Retina HiDPI clipping of the 640x480 framebuffer.
+  DISPLAY_DRV="cocoa,zoom-to-fit=on"
   AUDIO_DRV="coreaudio"
 fi
 
 echo ""
 echo "================================================================"
-echo "  Hollow Star OS+ — Okno graficzne QEMU (640x480)"
+echo "  Hollow Star OS+ — Okno graficzne QEMU (640x480, Calibri UI)"
 echo "================================================================"
-echo "  1) Okno graficzne QEMU otworzy się automatycznie."
-echo "  2) Sterowanie klawiaturą działa w TYM oknie terminala:"
-echo "     - Strzałki / Tab / 1-9 : poruszanie się po Launcherze"
-echo "     - Enter / Spacja       : uruchom / zatwierdź"
-echo "     - F1 (lub ~)           : pomoc skrótów"
-echo "     - Esc                  : powrót   |   Q / Ctrl+Q : shell"
-echo "     - Ctrl+C               : zamknij maszynę wirtualną"
+echo "  1) Możesz klikać/pisać BEZPOŚREDNIO w oknie QEMU (USB HID kbd)"
+echo "     ALBO w tym oknie terminala (Serial UART):"
+echo "     - Strzałki / Tab / 1-9,0 : poruszanie się i uruchamianie .hsapp"
+echo "     - Enter / Spacja         : zatwierdź / uruchom"
+echo "     - F1                     : pomoc skrótów (nakładka w kompozytorze)"
+echo "     - Esc                    : powrót do Launchera"
+echo "     - X                      : przejście do powłoki UART"
+echo "     - Ctrl+C (terminal)      : zamknij maszynę wirtualną"
 echo "================================================================"
 echo ""
 
@@ -58,5 +62,6 @@ qemu-system-aarch64 \
   -device usb-net,netdev=net0 \
   -audiodev "$AUDIO_DRV,id=snd0" \
   -device usb-audio,audiodev=snd0 \
+  -usb \
   -device usb-kbd \
   -kernel "$KERNEL_IMG"

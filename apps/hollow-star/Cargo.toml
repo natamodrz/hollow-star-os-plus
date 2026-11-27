@@ -3,7 +3,7 @@ name = "hollow-star-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hollow Star OS+ Desktop Compositor, 1st Setup, and Core Apps (.hsapp)"
+description = "Hollow Star OS+ Core Utilities Bundle (/system/apps/Apps.hsapp/exec)"
 
 [[bin]]
 name = "hollow-star"
@@ -13,3 +13,4 @@ bench = false
 
 [dependencies]
 libdelta = { path = "../../userland/libdelta" }
+libdelta-ui = { path = "../../userland/libdelta-ui" }

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Builds a 64 MiB MBR SD card image with 3 separated partitions for Hollow Star OS+ M6:
-  1. Partition 1 (`0x0C` FAT32, 16 MiB) -> `/boot`   (firmware boot files & README)
-  2. Partition 2 (`0xDF` DeltaFS, 24 MiB) -> `/system` (shell.elf + .hsapp bundles)
-  3. Partition 3 (`0xDF` DeltaFS, 20 MiB) -> `/user`   (notes, media, user apps; 3.9 MiB free tail for expansion test)
+"""Builds a 3-partition MBR SD card image for Hollow Star OS+ (`v0.6.0-rc.2`):
+  1. Partition 1 (`0x0C` FAT32/VFAT) -> `/boot`   (firmware boot files, config.txt, kernel8.img)
+  2. Partition 2 (`0xDF` DeltaFS)    -> `/system` (shell.elf, compositor.elf, modular .hsapp bundles)
+  3. Partition 3 (`0xDF` DeltaFS)    -> `/user`   (notes, config, media, user apps + free tail/expand)
 """
 
 from __future__ import annotations
 
+import argparse
 import math
 import struct
 import sys
@@ -14,31 +15,27 @@ import zlib
 from pathlib import Path
 
 SECTOR_SIZE = 512
-DISK_SECTORS = 131072  # 64 MiB
 DELTA_BLOCK = 4096
 SECTORS_PER_BLOCK = DELTA_BLOCK // SECTOR_SIZE
 
 BOOT_START = 2048
-BOOT_SECTORS = 32768  # 16 MiB
-
-SYSTEM_START = BOOT_START + BOOT_SECTORS
-SYSTEM_SECTORS = 49152  # 24 MiB
-
-USER_START = SYSTEM_START + SYSTEM_SECTORS
-USER_SECTORS = 40960  # 20 MiB (leaves ~3 MiB free tail at end of 64 MiB card for auto-expand test)
-
 FAT32_RESERVED = 32
 FAT32_NUM_FATS = 1
 FAT32_SPC = 8
-FAT32_SPF = 32
 FAT32_ROOT_CLUSTER = 2
 
 
 class Fat32Builder:
-    def __init__(self) -> None:
+    def __init__(self, start_lba: int, total_sectors: int) -> None:
+        self.start_lba = start_lba
+        self.total_sectors = total_sectors
         self.cluster_size = FAT32_SPC * SECTOR_SIZE
+        # Size FAT large enough to address every cluster in this partition.
+        est_clusters = max(256, total_sectors // FAT32_SPC)
+        self.spf = max(32, math.ceil((est_clusters + 4) * 4 / SECTOR_SIZE))
         self.fat = [0x0FFFFFF8, 0x0FFFFFFF, 0x0FFFFFFF]
         self.clusters: dict[int, bytearray] = {2: bytearray(self.cluster_size)}
+        self.sfn_seq = 1
 
     def alloc_chain(self, payload: bytes) -> int:
         if not payload:
@@ -55,45 +52,172 @@ class Fat32Builder:
         return first
 
     @staticmethod
-    def encode_83(name: str) -> bytes:
+    def _is_clean_83(name: str) -> bool:
+        if len(name) > 12 or " " in name:
+            return False
+        if "." in name:
+            parts = name.split(".")
+            if len(parts) != 2 or not (1 <= len(parts[0]) <= 8) or not (1 <= len(parts[1]) <= 3):
+                return False
+            allowed = parts[0] + parts[1]
+        else:
+            if not (1 <= len(name) <= 8):
+                return False
+            allowed = name
+        return all(ch.isascii() and (ch.isalnum() or ch in "_-$~!#%&{}()@'`^") for ch in allowed)
+
+    def _encode_83(self, name: str) -> bytes:
         upper = name.upper()
         base, ext = upper.rsplit(".", 1) if "." in upper else (upper, "")
-        return base[:8].ljust(8, " ").encode("ascii") + ext[:3].ljust(3, " ").encode("ascii")
+        clean_base = "".join(c for c in base if c.isalnum() or c in "_-$~")
+        clean_ext = "".join(c for c in ext if c.isalnum())[:3]
+        if not self._is_clean_83(name):
+            suffix = f"~{self.sfn_seq}"
+            self.sfn_seq += 1
+            clean_base = (clean_base[: max(1, 8 - len(suffix))] + suffix)[:8]
+        return clean_base[:8].ljust(8, " ").encode("ascii") + clean_ext.ljust(3, " ").encode("ascii")
+
+    @staticmethod
+    def _sfn_checksum(sfn: bytes) -> int:
+        chk = 0
+        for b in sfn:
+            chk = (((chk & 1) << 7) + (chk >> 1) + b) & 0xFF
+        return chk
+
+    def _alloc_dir_slots(self, dir_cid: int, count: int) -> tuple[bytearray, int]:
+        """Finds `count` contiguous 32-byte directory slots inside `dir_cid`."""
+        buf = self.clusters[dir_cid]
+        for off in range(0, len(buf) - (count - 1) * 32, 32):
+            if all(buf[off + k * 32] == 0 for k in range(count)):
+                return buf, off
+        raise RuntimeError("FAT32 directory full")
+
+    def _ensure_subdir(self, name: str) -> int:
+        upper = name.upper().encode("ascii")[:8].ljust(8, b" ") + b"   "
+        root_buf = self.clusters[FAT32_ROOT_CLUSTER]
+        for off in range(0, len(root_buf), 32):
+            if root_buf[off : off + 11] == upper and (root_buf[off + 11] & 0x10) != 0:
+                hi = struct.unpack_from("<H", root_buf, off + 20)[0]
+                lo = struct.unpack_from("<H", root_buf, off + 26)[0]
+                return (hi << 16) | lo
+        # Allocate 1 empty cluster for the subdirectory with `.` and `..`.
+        sub_cid = len(self.fat)
+        self.fat.append(0x0FFFFFFF)
+        sub_buf = bytearray(self.cluster_size)
+        sub_buf[0:11] = b".          "
+        sub_buf[11] = 0x10
+        struct.pack_into("<H", sub_buf, 20, (sub_cid >> 16) & 0xFFFF)
+        struct.pack_into("<H", sub_buf, 26, sub_cid & 0xFFFF)
+        sub_buf[32:43] = b"..         "
+        sub_buf[43] = 0x10
+        self.clusters[sub_cid] = sub_buf
+
+        rbuf, off = self._alloc_dir_slots(FAT32_ROOT_CLUSTER, 1)
+        rbuf[off : off + 11] = upper
+        rbuf[off + 11] = 0x10
+        struct.pack_into("<H", rbuf, off + 20, (sub_cid >> 16) & 0xFFFF)
+        struct.pack_into("<H", rbuf, off + 26, sub_cid & 0xFFFF)
+        return sub_cid
 
     def add_file(self, name: str, payload: bytes) -> None:
+        if "/" in name:
+            subdir, leaf = name.split("/", 1)
+            dir_cid = self._ensure_subdir(subdir)
+            name = leaf
+        else:
+            dir_cid = FAT32_ROOT_CLUSTER
+
         cid = self.alloc_chain(payload)
-        buf = self.clusters[FAT32_ROOT_CLUSTER]
-        for off in range(0, len(buf), 32):
-            if buf[off] == 0:
-                buf[off : off + 11] = self.encode_83(name)
-                buf[off + 11] = 0x20
-                struct.pack_into("<H", buf, off + 20, (cid >> 16) & 0xFFFF)
-                struct.pack_into("<H", buf, off + 26, cid & 0xFFFF)
-                struct.pack_into("<I", buf, off + 28, len(payload))
-                return
-        raise RuntimeError("FAT32 root directory full")
+        sfn = self._encode_83(name)
+        need_lfn = not self._is_clean_83(name) or name != name.upper()
+        # Only emit LFN when name exceeds 8.3; standard 8.3 uppercase avoids extra slots.
+        if not need_lfn:
+            buf, off = self._alloc_dir_slots(dir_cid, 1)
+            self._write_sfn_entry(buf, off, sfn, cid, len(payload))
+            return
+
+        # Build UTF-16LE LFN chunks in reverse order.
+        chars = [ord(c) for c in name] + [0x0000]
+        while len(chars) % 13 != 0:
+            chars.append(0xFFFF)
+        num_lfn = len(chars) // 13
+        chk = self._sfn_checksum(sfn)
+
+        buf, off = self._alloc_dir_slots(dir_cid, num_lfn + 1)
+        for seq in range(num_lfn, 0, -1):
+            base = (seq - 1) * 13
+            chunk = chars[base : base + 13]
+            ord_byte = seq | (0x40 if seq == num_lfn else 0x00)
+            lfn_off = off + (num_lfn - seq) * 32
+            buf[lfn_off] = ord_byte
+            for j in range(5):
+                struct.pack_into("<H", buf, lfn_off + 1 + j * 2, chunk[j])
+            buf[lfn_off + 11] = 0x0F
+            buf[lfn_off + 12] = 0x00
+            buf[lfn_off + 13] = chk
+            for j in range(6):
+                struct.pack_into("<H", buf, lfn_off + 14 + j * 2, chunk[5 + j])
+            struct.pack_into("<H", buf, lfn_off + 26, 0)
+            for j in range(2):
+                struct.pack_into("<H", buf, lfn_off + 28 + j * 2, chunk[11 + j])
+
+        self._write_sfn_entry(buf, off + num_lfn * 32, sfn, cid, len(payload))
+
+    @staticmethod
+    def _write_sfn_entry(buf: bytearray, off: int, sfn: bytes, cid: int, size: int) -> None:
+        buf[off : off + 11] = sfn
+        buf[off + 11] = 0x20
+        struct.pack_into("<H", buf, off + 20, (cid >> 16) & 0xFFFF)
+        struct.pack_into("<H", buf, off + 26, cid & 0xFFFF)
+        struct.pack_into("<I", buf, off + 28, size)
 
     def write_to_image(self, img: bytearray) -> None:
-        p_off = BOOT_START * SECTOR_SIZE
-        img[p_off : p_off + 3] = b"\xEB\x58\x90"
-        img[p_off + 3 : p_off + 11] = b"DELTAOS "
-        struct.pack_into("<H", img, p_off + 11, SECTOR_SIZE)
-        img[p_off + 13] = FAT32_SPC
-        struct.pack_into("<H", img, p_off + 14, FAT32_RESERVED)
-        img[p_off + 16] = FAT32_NUM_FATS
-        struct.pack_into("<I", img, p_off + 32, BOOT_SECTORS)
-        struct.pack_into("<I", img, p_off + 36, FAT32_SPF)
-        struct.pack_into("<I", img, p_off + 44, FAT32_ROOT_CLUSTER)
-        struct.pack_into("<H", img, p_off + 48, 1)
-        struct.pack_into("<H", img, p_off + 50, 6)
-        img[p_off + 82 : p_off + 90] = b"FAT32   "
-        img[p_off + 510 : p_off + 512] = b"\x55\xAA"
+        p_off = self.start_lba * SECTOR_SIZE
+        # Primary Boot Sector (sector 0)
+        bpb = bytearray(SECTOR_SIZE)
+        bpb[0:3] = b"\xEB\x58\x90"
+        bpb[3:11] = b"DELTAOS "
+        struct.pack_into("<H", bpb, 11, SECTOR_SIZE)
+        bpb[13] = FAT32_SPC
+        struct.pack_into("<H", bpb, 14, FAT32_RESERVED)
+        bpb[16] = FAT32_NUM_FATS
+        bpb[21] = 0xF8  # Media descriptor: fixed/removable disk
+        struct.pack_into("<H", bpb, 24, 63)  # Sectors per track
+        struct.pack_into("<H", bpb, 26, 255)  # Heads
+        struct.pack_into("<I", bpb, 28, self.start_lba)  # Hidden sectors
+        struct.pack_into("<I", bpb, 32, self.total_sectors)
+        struct.pack_into("<I", bpb, 36, self.spf)
+        struct.pack_into("<I", bpb, 44, FAT32_ROOT_CLUSTER)
+        struct.pack_into("<H", bpb, 48, 1)  # FSInfo sector
+        struct.pack_into("<H", bpb, 50, 6)  # Backup boot sector
+        bpb[64] = 0x80
+        bpb[66] = 0x29  # Extended boot signature
+        struct.pack_into("<I", bpb, 67, 0x4445_4C54)
+        bpb[71:82] = b"DELTA_BOOT "
+        bpb[82:90] = b"FAT32   "
+        bpb[510:512] = b"\x55\xAA"
+
+        img[p_off : p_off + SECTOR_SIZE] = bpb
+        # Backup Boot Sector (sector 6)
+        bkp_off = p_off + 6 * SECTOR_SIZE
+        img[bkp_off : bkp_off + SECTOR_SIZE] = bpb
+
+        # FSInfo Sector (sector 1)
+        fsinfo = bytearray(SECTOR_SIZE)
+        struct.pack_into("<I", fsinfo, 0, 0x41615252)
+        struct.pack_into("<I", fsinfo, 484, 0x61417272)
+        data_sectors = self.total_sectors - FAT32_RESERVED - FAT32_NUM_FATS * self.spf
+        free_clusters = max(0, (data_sectors // FAT32_SPC) - (len(self.fat) - 2))
+        struct.pack_into("<I", fsinfo, 488, free_clusters)
+        struct.pack_into("<I", fsinfo, 492, len(self.fat))
+        struct.pack_into("<I", fsinfo, 508, 0xAA550000)
+        img[p_off + SECTOR_SIZE : p_off + 2 * SECTOR_SIZE] = fsinfo
 
         fat_off = p_off + FAT32_RESERVED * SECTOR_SIZE
         for idx, val in enumerate(self.fat):
             struct.pack_into("<I", img, fat_off + idx * 4, val)
 
-        data_off = fat_off + FAT32_NUM_FATS * FAT32_SPF * SECTOR_SIZE
+        data_off = fat_off + FAT32_NUM_FATS * self.spf * SECTOR_SIZE
         for cid, cbuf in self.clusters.items():
             off = data_off + (cid - 2) * self.cluster_size
             img[off : off + len(cbuf)] = cbuf
@@ -108,8 +232,9 @@ class DeltaFsBuilder:
         self.journal_start = 1
         self.journal_blocks = 16
         self.bitmap_start = 17
-        self.bitmap_blocks = 8
-        self.inode_start = 25
+        needed_bm_bytes = math.ceil(self.total_blocks / 8)
+        self.bitmap_blocks = max(8, math.ceil(needed_bm_bytes / DELTA_BLOCK))
+        self.inode_start = self.bitmap_start + self.bitmap_blocks
         self.inode_blocks = 16
         self.inode_count = self.inode_blocks * (DELTA_BLOCK // 128)
         self.data_start = self.inode_start + self.inode_blocks
@@ -234,69 +359,142 @@ class DeltaFsBuilder:
             img[off : off + DELTA_BLOCK] = buf
 
 
-def main() -> int:
-    if len(sys.argv) != 5:
+def _add_hsapp(
+    sysfs: DeltaFsBuilder,
+    apps_dir: int,
+    bundle_name: str,
+    exec_bytes: bytes,
+    info_name: str,
+    info_bytes: bytes,
+) -> None:
+    bdir = sysfs.mkdir(apps_dir, bundle_name, is_hsapp=True)
+    assets = sysfs.mkdir(bdir, "Assets")
+    sysfs.add_file(assets, info_name, info_bytes, b"text/plain")
+    tag = bundle_name.encode("ascii")[:10]
+    sysfs.add_file(bdir, "icon.png", b"\x89PNG\r\n\x1a\n" + tag, b"image/png")
+    sysfs.add_file(bdir, "exec", exec_bytes, b"application/x-elf")
+
+
+def build_image(
+    userland_dir: Path,
+    out_path: Path,
+    *,
+    disk_mb: int = 64,
+    boot_mb: int = 16,
+    system_mb: int = 24,
+    user_mb: int | None = None,
+    boot_files: dict[str, bytes] | None = None,
+) -> int:
+    """Builds a 3-partition Hollow Star OS+ MBR image and writes it to `out_path`."""
+    required = {
+        "shell": userland_dir / "shell",
+        "compositor": userland_dir / "compositor",
+        "setup": userland_dir / "setup",
+        "launcher": userland_dir / "launcher",
+        "terminal": userland_dir / "terminal",
+        "hollow-star": userland_dir / "hollow-star",
+        "hello": userland_dir / "hello",
+    }
+    for name, p in required.items():
+        if not p.exists():
+            print(f"[mk_sdcard] Missing binary: {p} ({name})", file=sys.stderr)
+            return 1
+
+    bins = {k: p.read_bytes() for k, p in required.items()}
+
+    disk_sectors = disk_mb * 2048
+    boot_sectors = boot_mb * 2048
+    system_start = BOOT_START + boot_sectors
+    system_sectors = system_mb * 2048
+    user_start = system_start + system_sectors
+    if user_mb is None:
+        # Leave ~3 MiB free tail on 64 MiB default test card for /user partition auto-expand.
+        user_sectors = max(16 * 2048, disk_sectors - user_start - 3 * 2048)
+    else:
+        user_sectors = user_mb * 2048
+    if user_start + user_sectors > disk_sectors:
         print(
-            f"Usage: {sys.argv[0]} <shell_elf> <hello_elf> <hollow_star_elf> <out_img>",
+            f"[mk_sdcard] Image size {disk_mb} MiB too small for partitions ({(user_start + user_sectors) // 2048} MiB needed)",
             file=sys.stderr,
         )
         return 1
 
-    shell_bytes = Path(sys.argv[1]).read_bytes()
-    hello_bytes = Path(sys.argv[2]).read_bytes()
-    hollow_bytes = Path(sys.argv[3]).read_bytes()
-    out_path = Path(sys.argv[4])
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    img = bytearray(disk_sectors * SECTOR_SIZE)
 
-    img = bytearray(DISK_SECTORS * SECTOR_SIZE)
-
-    # MBR: Partition 1 (Boot FAT32), Partition 2 (System DeltaFS 0xDF), Partition 3 (User DeltaFS 0xDF)
+    # MBR: Part 1 (/boot FAT32 0x0C), Part 2 (/system DeltaFS 0xDF), Part 3 (/user DeltaFS 0xDF)
     img[510:512] = b"\x55\xAA"
     img[446 + 4] = 0x0C
-    struct.pack_into("<II", img, 446 + 8, BOOT_START, BOOT_SECTORS)
+    struct.pack_into("<II", img, 446 + 8, BOOT_START, boot_sectors)
     img[462 + 4] = 0xDF
-    struct.pack_into("<II", img, 462 + 8, SYSTEM_START, SYSTEM_SECTORS)
+    struct.pack_into("<II", img, 462 + 8, system_start, system_sectors)
     img[478 + 4] = 0xDF
-    struct.pack_into("<II", img, 478 + 8, USER_START, USER_SECTORS)
+    struct.pack_into("<II", img, 478 + 8, user_start, user_sectors)
 
-    # 1. /boot (FAT32)
-    boot = Fat32Builder()
+    # 1. /boot (FAT32 / VFAT)
+    boot = Fat32Builder(BOOT_START, boot_sectors)
     boot.add_file(
         "README.TXT",
-        b"Hollow Star OS+ Boot Partition (FAT32). Place config.txt & kernel8.img here.\n",
+        b"Hollow Star OS+ Boot Partition (FAT32). Place config.txt, firmware, and kernel8.img here.\n",
     )
-    boot.add_file("CONFIG.TXT", b"arm_64bit=1\nenable_uart=1\nhdmi_force_hotplug=1\n")
+    if boot_files:
+        for fname, data in boot_files.items():
+            boot.add_file(fname, data)
+    else:
+        boot.add_file("CONFIG.TXT", b"arm_64bit=1\nenable_uart=1\nhdmi_force_hotplug=1\n")
     boot.write_to_image(img)
 
     # 2. /system (DeltaFS role=1)
-    sysfs = DeltaFsBuilder(SYSTEM_START, SYSTEM_SECTORS, role=1, label="SYSTEM")
+    sysfs = DeltaFsBuilder(system_start, system_sectors, role=1, label="SYSTEM")
     sys_bin = sysfs.mkdir(sysfs.root_inode, "bin")
-    sysfs.add_file(sys_bin, "shell.elf", shell_bytes, b"application/x-elf")
+    sysfs.add_file(sys_bin, "shell.elf", bins["shell"], b"application/x-elf")
+    sysfs.add_file(sys_bin, "compositor.elf", bins["compositor"], b"application/x-elf")
 
     sys_apps = sysfs.mkdir(sysfs.root_inode, "apps")
-    hello_dir = sysfs.mkdir(sys_apps, "Hello.hsapp", is_hsapp=True)
-    hello_assets = sysfs.mkdir(hello_dir, "Assets")
-    sysfs.add_file(
-        hello_assets,
+    _add_hsapp(
+        sysfs,
+        sys_apps,
+        "Hello.hsapp",
+        bins["hello"],
         "info.txt",
-        b"Hello.hsapp v0.6.0-rc.1 (.hsapp bundle verified on System DeltaFS!)",
+        b"Hello.hsapp v0.6.0-rc.2 (.hsapp bundle verified on System DeltaFS!)",
     )
-    sysfs.add_file(hello_dir, "icon.png", b"\x89PNG\r\n\x1a\nHELLO_ICON")
-    sysfs.add_file(hello_dir, "exec", hello_bytes, b"application/x-elf")
-
-    hs_dir = sysfs.mkdir(sys_apps, "HollowStar.hsapp", is_hsapp=True)
-    hs_assets = sysfs.mkdir(hs_dir, "Assets")
-    sysfs.add_file(
-        hs_assets,
+    _add_hsapp(
+        sysfs,
+        sys_apps,
+        "Setup.hsapp",
+        bins["setup"],
+        "info.txt",
+        b"Hollow Star OS+ 1st Setup Wizard v0.6.0-rc.2",
+    )
+    _add_hsapp(
+        sysfs,
+        sys_apps,
+        "Launcher.hsapp",
+        bins["launcher"],
+        "info.txt",
+        b"Hollow Star OS+ App Grid Launcher v0.6.0-rc.2",
+    )
+    _add_hsapp(
+        sysfs,
+        sys_apps,
+        "Terminal.hsapp",
+        bins["terminal"],
+        "info.txt",
+        b"Hollow Star OS+ Terminal Emulator v0.6.0-rc.2",
+    )
+    _add_hsapp(
+        sysfs,
+        sys_apps,
+        "Apps.hsapp",
+        bins["hollow-star"],
         "banner.txt",
-        b"Hollow Star OS+ v0.6.0-rc.1 / Delta Kernel Desktop & Launcher",
+        b"Hollow Star OS+ v0.6.0-rc.2 / Core Applications Suite",
     )
-    sysfs.add_file(hs_dir, "icon.png", b"\x89PNG\r\n\x1a\nHOLLOWSTAR")
-    sysfs.add_file(hs_dir, "exec", hollow_bytes, b"application/x-elf")
     sysfs.write_to_image(img)
 
     # 3. /user (DeltaFS role=2)
-    usrfs = DeltaFsBuilder(USER_START, USER_SECTORS, role=2, label="USER")
+    usrfs = DeltaFsBuilder(user_start, user_sectors, role=2, label="USER")
     usrfs.mkdir(usrfs.root_inode, "config")
     notes_dir = usrfs.mkdir(usrfs.root_inode, "notes")
     media_dir = usrfs.mkdir(usrfs.root_inode, "media")
@@ -305,9 +503,10 @@ def main() -> int:
         notes_dir,
         "welcome.md",
         b"# Hollow Star OS+ User Partition (DeltaFS)\n\n"
-        b"- Boot (`/boot`): FAT32\n"
+        b"- Boot (`/boot`): FAT32 / VFAT\n"
         b"- System (`/system`): DeltaFS (WAL journal)\n"
-        b"- User (`/user`): DeltaFS (WAL journal + auto-expand)\n",
+        b"- User (`/user`): DeltaFS (WAL journal + auto-expand)\n"
+        b"- Desktop: Modular Compositor + Setup + Launcher + Terminal\n",
         b"text/markdown",
     )
     usrfs.add_file(
@@ -320,9 +519,17 @@ def main() -> int:
 
     out_path.write_bytes(img)
     print(
-        f"[mk_sdcard] Built {out_path} ({len(img) // (1024 * 1024)} MiB: /boot FAT32 + /system DeltaFS + /user DeltaFS)"
+        f"[mk_sdcard] Built {out_path} ({disk_mb} MiB: /boot {boot_mb}M FAT32 + /system {system_mb}M DeltaFS + /user {user_sectors // 2048}M DeltaFS)"
     )
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build Hollow Star OS+ QEMU SD card image.")
+    parser.add_argument("userland_dir", type=Path, help="Path to target/userland/<triple>/release")
+    parser.add_argument("out_img", type=Path, help="Output image path (e.g. target/sdcard.img)")
+    args = parser.parse_args()
+    return build_image(args.userland_dir, args.out_img)
 
 
 if __name__ == "__main__":

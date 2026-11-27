@@ -1,9 +1,11 @@
-# OS / Editor noise
+# OS / Editor / Python cache noise
 .DS_Store
 .Ds_Store
 ._*
 .vscode/
 *.log
+__pycache__/
+*.pyc
 
 # Build directories & compiled OS/firmware binaries
 build/

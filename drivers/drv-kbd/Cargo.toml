@@ -1,0 +1,14 @@
+[package]
+name = "drv-kbd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Userspace (EL0) BCM2837 DWC2 USB Host & HID Boot Keyboard driver"
+
+[[bin]]
+name = "drv-kbd"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }

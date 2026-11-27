@@ -65,12 +65,12 @@ fn run_m6_storage_and_ui(uart: usize, vfs: usize) -> Result<(), isize> {
         return Err(-5);
     }
 
-    // 5. Launch HollowStar.hsapp Desktop / 1st Setup Compositor (renders FB + RT Audio chime)
-    let gui_pid = libdelta::spawn_from_vfs("hollowstar", "/system/apps/HollowStar.hsapp/exec")?;
+    // 5. Launch Modular Desktop Compositor (`/system/bin/compositor.elf`)
+    let gui_pid = libdelta::spawn_from_vfs("compositor", "/system/bin/compositor.elf")?;
     let _ = libdelta::wait_pid(gui_pid);
     libdelta::print_via(
         uart,
-        "[el0/shell] Returned from HollowStar.hsapp to interactive shell (type 'gui' or 'help').\n",
+        "[el0/shell] Returned from Desktop Compositor to interactive shell (type 'gui' or 'help').\n",
     );
 
     Ok(())
@@ -133,9 +133,7 @@ fn execute_command(uart: usize, vfs: usize, cmd: &str) -> bool {
             );
         }
         "gui" | "launcher" => {
-            if let Ok(pid) =
-                libdelta::spawn_from_vfs("hollowstar", "/system/apps/HollowStar.hsapp/exec")
-            {
+            if let Ok(pid) = libdelta::spawn_from_vfs("compositor", "/system/bin/compositor.elf") {
                 let _ = libdelta::wait_pid(pid);
             }
         }

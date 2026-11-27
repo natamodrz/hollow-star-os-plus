@@ -35,6 +35,7 @@ static DRV_UART_ELF: &[u8] = include_bytes!(env!("DRV_UART_ELF"));
 static DRV_SD_ELF: &[u8] = include_bytes!(env!("DRV_SD_ELF"));
 static DRV_FB_ELF: &[u8] = include_bytes!(env!("DRV_FB_ELF"));
 static DRV_AUDIO_ELF: &[u8] = include_bytes!(env!("DRV_AUDIO_ELF"));
+static DRV_KBD_ELF: &[u8] = include_bytes!(env!("DRV_KBD_ELF"));
 static VFSD_ELF: &[u8] = include_bytes!(env!("VFSD_ELF"));
 static INIT_ELF: &[u8] = include_bytes!(env!("INIT_ELF"));
 
@@ -188,12 +189,12 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         );
         let _ = writeln!(
             out,
-            "[el0]  Starting EL0 servers (drv-uart, drv-sd, vfsd, drv-fb, drv-audio, init)..."
+            "[el0]  Starting EL0 servers (drv-uart, drv-sd, vfsd, drv-fb, drv-audio, drv-kbd, init)..."
         );
     }
     active_board.console().flush();
 
-    // Launch EL0 system servers (`drv-uart`, `drv-sd`, `vfsd`, `drv-fb`, `drv-audio`) + `init`.
+    // Launch EL0 system servers (`drv-uart`, `drv-sd`, `vfsd`, `drv-fb`, `drv-audio`, `drv-kbd`) + `init`.
     // Only driver servers receive their isolated 4 KiB Device MMIO pages.
     let uart_region = active_board.uart_mmio_region();
     let uart_kind = if cfg!(feature = "mini-uart") {
@@ -248,6 +249,17 @@ pub extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         },
     )
     .expect("spawn EL0 drv-audio server");
+
+    let _drv_kbd_pid = proc::spawn_elf(
+        "drv-kbd",
+        DRV_KBD_ELF,
+        Priority::URGENT,
+        DeviceCaps {
+            usb: active_board.usb_mmio_region(),
+            ..DeviceCaps::none()
+        },
+    )
+    .expect("spawn EL0 drv-kbd server");
 
     let _init_pid = proc::spawn_elf("init", INIT_ELF, Priority::NORMAL, DeviceCaps::none())
         .expect("spawn EL0 init process");

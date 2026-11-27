@@ -5,7 +5,7 @@ pub mod elf;
 use core::ptr::copy_nonoverlapping;
 
 use delta_abi::{
-    AudioMmioInfo, DmaPageInfo, FbMmioInfo, SdMmioInfo, UartKind, UartMmioInfo, errno,
+    AudioMmioInfo, DmaPageInfo, FbMmioInfo, SdMmioInfo, UartKind, UartMmioInfo, UsbMmioInfo, errno,
 };
 use hal_core::{MemoryRegion, PAGE_SIZE, PhysAddr, VirtAddr, mem::align_down, mem::align_up};
 
@@ -23,6 +23,7 @@ const USER_UART_MMIO_VA: usize = 0x0000_1000_0000;
 const USER_SD_MMIO_VA: usize = 0x0000_1001_0000;
 const USER_FB_MBOX_VA: usize = 0x0000_1002_0000;
 const USER_AUDIO_MMIO_VA: usize = 0x0000_1003_0000;
+const USER_USB_MMIO_VA: usize = 0x0000_1004_0000;
 const USER_DMA_BASE_VA: usize = 0x0000_1800_0000;
 /// Starting virtual base for dynamic per-process shared memory (`Shm`) mappings.
 const USER_SHM_BASE_VA: usize = 0x0000_2000_0000;
@@ -38,6 +39,7 @@ pub struct DeviceCaps {
     pub sd: Option<(MemoryRegion, u32)>,
     pub display: Option<(MemoryRegion, usize)>,
     pub audio: Option<MemoryRegion>,
+    pub usb: Option<(MemoryRegion, u32)>,
 }
 
 impl DeviceCaps {
@@ -47,6 +49,7 @@ impl DeviceCaps {
             sd: None,
             display: None,
             audio: None,
+            usb: None,
         }
     }
 }
@@ -63,6 +66,7 @@ struct ProcessControlBlock {
     sd_mmio: Option<SdMmioInfo>,
     fb_mmio: Option<FbMmioInfo>,
     audio_mmio: Option<AudioMmioInfo>,
+    usb_mmio: Option<UsbMmioInfo>,
     waiter_tid: Option<ThreadId>,
     exited: bool,
     exit_code: usize,
@@ -82,6 +86,7 @@ impl ProcessControlBlock {
             sd_mmio: None,
             fb_mmio: None,
             audio_mmio: None,
+            usb_mmio: None,
             waiter_tid: None,
             exited: false,
             exit_code: 0,
@@ -118,20 +123,24 @@ impl ProcessTable {
 
 static PROCS: IrqSpinLock<ProcessTable> = IrqSpinLock::new(ProcessTable::new());
 
-/// Helper mapping one 4 KiB device MMIO page for an EL0 driver process.
+/// Helper mapping one or more 4 KiB device MMIO pages for an EL0 driver process.
 fn map_device_mmio(
     ttbr0_root: PhysAddr,
     user_va_page: usize,
     region: MemoryRegion,
 ) -> Result<usize, elf::ElfError> {
-    let pa = PhysAddr(align_down(region.base, PAGE_SIZE));
-    let offset = region.base - pa.as_usize();
-    mmu::map_user_page(
-        ttbr0_root,
-        VirtAddr(user_va_page),
-        pa,
-        UserPageAttrs::DeviceMmio,
-    )?;
+    let aligned_pa = align_down(region.base, PAGE_SIZE);
+    let offset = region.base - aligned_pa;
+    let total_bytes = align_up(offset + region.size.max(PAGE_SIZE), PAGE_SIZE);
+    let pages = total_bytes / PAGE_SIZE;
+    for i in 0..pages {
+        mmu::map_user_page(
+            ttbr0_root,
+            VirtAddr(user_va_page + i * PAGE_SIZE),
+            PhysAddr(aligned_pa + i * PAGE_SIZE),
+            UserPageAttrs::DeviceMmio,
+        )?;
+    }
     Ok(user_va_page + offset)
 }
 
@@ -181,6 +190,16 @@ pub fn spawn_elf(
         None
     };
 
+    let usb_mmio = if let Some((region, irq_num)) = devices.usb {
+        Some(UsbMmioInfo {
+            virt_base: map_device_mmio(loaded.ttbr0_root, USER_USB_MMIO_VA, region)?,
+            irq_num,
+            _pad: 0,
+        })
+    } else {
+        None
+    };
+
     let pid = {
         let mut table = PROCS.lock();
         let slot = table.alloc_slot().ok_or(elf::ElfError::OutOfMemory)?;
@@ -198,6 +217,7 @@ pub fn spawn_elf(
             sd_mmio,
             fb_mmio,
             audio_mmio,
+            usb_mmio,
             waiter_tid: None,
             exited: false,
             exit_code: 0,
@@ -306,7 +326,11 @@ pub fn wait_pid(waiter_tid: ThreadId, target_pid: u64) -> Result<usize, isize> {
             let mut table = PROCS.lock();
             let p = table.find_by_pid_mut(target_pid).ok_or(errno::ENOENT)?;
             if p.exited {
-                Some(p.exit_code)
+                let code = p.exit_code;
+                // Reclaim the PCB slot once reaped so launching apps repeatedly
+                // in a desktop session never exhausts `MAX_PROCS`.
+                p.active = false;
+                Some(code)
             } else {
                 p.waiter_tid = Some(waiter_tid);
                 sched::prepare_wait(waiter_tid);
@@ -354,12 +378,22 @@ pub fn audio_mmio_info(pid: u64) -> Option<AudioMmioInfo> {
     table.find_by_pid(pid).and_then(|p| p.audio_mmio)
 }
 
-/// Allocates one non-cacheable DMA 4 KiB page for an authorized display/audio/SD driver.
+/// Returns the isolated USB Host (`DWC2`) MMIO + IRQ info if `pid` holds USB capability.
+pub fn usb_mmio_info(pid: u64) -> Option<UsbMmioInfo> {
+    let table = PROCS.lock();
+    table.find_by_pid(pid).and_then(|p| p.usb_mmio)
+}
+
+/// Allocates one non-cacheable DMA 4 KiB page for an authorized driver server.
 pub fn alloc_dma_page(pid: u64, ttbr0_root: PhysAddr) -> Result<DmaPageInfo, isize> {
     let va = {
         let mut table = PROCS.lock();
         let p = table.find_by_pid_mut(pid).ok_or(errno::ENOENT)?;
-        if p.fb_mmio.is_none() && p.audio_mmio.is_none() && p.sd_mmio.is_none() {
+        if p.fb_mmio.is_none()
+            && p.audio_mmio.is_none()
+            && p.sd_mmio.is_none()
+            && p.usb_mmio.is_none()
+        {
             return Err(errno::EPERM);
         }
         let va = p.next_dma_va;
@@ -421,10 +455,11 @@ pub fn map_fb_phys(
 /// Returns `true` if `pid` was granted capability to handle peripheral IRQ `irq_num`.
 pub fn has_irq_cap(pid: u64, irq_num: u32) -> bool {
     let table = PROCS.lock();
-    table
-        .find_by_pid(pid)
-        .and_then(|p| p.sd_mmio)
-        .is_some_and(|sd| sd.irq_num == irq_num)
+    let Some(p) = table.find_by_pid(pid) else {
+        return false;
+    };
+    p.sd_mmio.is_some_and(|sd| sd.irq_num == irq_num)
+        || p.usb_mmio.is_some_and(|usb| usb.irq_num == irq_num)
 }
 
 /// Safely copies `dst.len()` bytes from an EL0 virtual address `user_ptr` in `ttbr0_root`.

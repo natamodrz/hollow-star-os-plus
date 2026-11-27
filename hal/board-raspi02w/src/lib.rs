@@ -8,8 +8,8 @@
 
 use board_raspi3b::{
     ARM_LOCAL_BASE, ARM_LOCAL_SIZE, ActiveConsole, EMMC_BASE, EMMC_IRQ, MAILBOX_BASE,
-    PERIPHERAL_BASE, PERIPHERAL_SIZE, PWM_BASE, Raspi3bBoard, VC_BUS_ALIAS_OFFSET,
-    bcm2837_wake_secondary_core, halt_forever, irq, timer,
+    PERIPHERAL_BASE, PERIPHERAL_SIZE, PWM_BASE, Raspi3bBoard, USB_DWC2_BASE, USB_DWC2_IRQ,
+    USB_DWC2_SIZE, VC_BUS_ALIAS_OFFSET, bcm2837_wake_secondary_core, halt_forever, irq, timer,
 };
 use hal_core::{Board, BoardInfo, MemoryKind, MemoryRegion, PAGE_SIZE, SmpError};
 
@@ -119,6 +119,13 @@ impl Board for Raspi02wBoard {
             PWM_BASE,
             PAGE_SIZE,
             MemoryKind::DeviceMmio,
+        ))
+    }
+
+    fn usb_mmio_region(&self) -> Option<(MemoryRegion, u32)> {
+        Some((
+            MemoryRegion::new(USB_DWC2_BASE, USB_DWC2_SIZE, MemoryKind::DeviceMmio),
+            USB_DWC2_IRQ,
         ))
     }
 

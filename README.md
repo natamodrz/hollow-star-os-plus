@@ -19,11 +19,11 @@ A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Micr
   - Strictly hardware-agnostic kernel code — all SoC MMIO addresses are isolated in board crates (`hal/board-raspi3b`, `hal/board-raspi02w`) behind `hal-core` traits and Device Tree Blob (`DTB`) parsing.
   - Physical 4 KiB frame allocator, AArch64 MMU with W^X kernel permissions (`TTBR0_EL1` isolated per-process EL0 + `TTBR1_EL1` higher-half kernel + `NormalNc` DMA/VRAM), EL1 exception vector table, and ARM Generic Timer IRQ handling.
   - **BeOS-Inspired SMP Multimedia Scheduler (M3):** 4-core Cortex-A53 SMP with priority tiers `1..=120` including Real-Time audio/video (`100..=120`) and priority inheritance on IPC.
-  - **Capability, Port IPC, Shm & IRQ Forwarding (M4–M6):** Synchronous/asynchronous port message passing (`svc.uart`, `svc.sd`, `svc.vfs`, `svc.fb`, `svc.audio`), zero-copy `Shm` buffers, userspace peripheral IRQ forwarding, and EL0 drivers.
-- **Separated Storage (`DeltaFS` + 3-Partition MBR), Display, RT Audio & Desktop (`drivers/`, `fs/`, `userland/`, `apps/`):**
-  - **3-Partition Layout & DeltaFS WAL Journaling (M5–M6):** Separated **`/boot`** (`FAT32`), **`/system`** (**DeltaFS** with CRC32 + Write-Ahead Journal + `.hsapp` bundle metadata), and **`/user`** (**DeltaFS** user config/notes/media with online partition expansion to end of SD card), plus `/dev` and `/proc`.
-  - **Display & Real-Time Audio Servers (M6):** Isolated `drv-fb` VideoCore Mailbox `640x480@32bpp` framebuffer + SoC thermal sensor, and `drv-audio` running at Delta Scheduler **Real-Time Priority `110`**.
-  - **Desktop Compositor & `1st Setup` (`HollowStar.hsapp`, M6):** Bilingual **`English` / `Polski`** UI, `1st Setup` wizard, universal **`F1`** help overlay, automatic hiding of Wi-Fi/BT/FTP controls on non-wireless builds, System Monitor (`/boot`, `/system`, `/user` stats & expand), Markdown Notes, File Explorer, RT Media Player, Calculator (`^`, `sqrt`, `F2` fractions), Classic Games (`Brick Breaker`, `Tetris`, `Racing`), and Settings.
+  - **Capability, Port IPC, Shm & IRQ Forwarding (M4–M6):** Synchronous/asynchronous port message passing (`svc.uart`, `svc.sd`, `svc.vfs`, `svc.fb`, `svc.audio`, `svc.kbd`, `svc.desktop`), zero-copy `Shm` buffers, userspace peripheral IRQ forwarding, and EL0 drivers.
+- **Separated Storage (`DeltaFS` + 3-Partition MBR), Display, USB HID, RT Audio & Modular Desktop (`drivers/`, `fs/`, `userland/`, `apps/`):**
+  - **3-Partition Layout & DeltaFS WAL Journaling (M5–M6):** Separated **`/boot`** (`FAT32`/`VFAT` LFN), **`/system`** (**DeltaFS** with CRC32 + Write-Ahead Journal + `.hsapp` bundle metadata), and **`/user`** (**DeltaFS** user config/notes/media with online partition expansion to end of SD card), plus `/dev` and `/proc`.
+  - **Display, USB HID Keyboard & Real-Time Audio Servers (M6):** Isolated `drv-fb` VideoCore Mailbox `640x480@32bpp` framebuffer (`TAG_SET_VIRTUAL_OFFSET`), `drv-kbd` EL0 Synopsys DWC2 USB HID keyboard driver (hub + OTG), and `drv-audio` running at Delta Scheduler **Real-Time Priority `110`**.
+  - **Modular Desktop (`libdelta-ui`, `compositor`, `Setup`, `Launcher`, `Terminal`, `Apps`):** Bilingual **`English` / `Polski`** UI rendered with an original GPL-3-safe **Calibri**-styled proportional humanist sans font + **`8x14` Monospace** terminal font, separated EL0 `compositor` (`svc.desktop`), `1st Setup` wizard, `.hsapp` Grid Launcher, graphical **Terminal Emulator**, universal **`F1`** help overlay, System Monitor, Markdown Notes, File Explorer, RT Media Player, Scientific Calculator, Classic Games, and Settings.
 
 ---
 
@@ -77,11 +77,14 @@ This repository follows strict **Semantic Versioning** (`MAJOR.MINOR.PATCH`):
 # Non-blocking QEMU raspi3b boot smoke test
 ./delta.sh smoke
 
-# Interactive QEMU GUI window with Graphics, CoreAudio, USB-Net & instant keyboard navigation
+# Interactive QEMU GUI window (Cocoa zoom-to-fit on macOS, USB HID keyboard, CoreAudio, USB-Net)
 ./run-gui.sh
 
-# Full M6 RC1 verification (Graphics FB + RT Audio + USB-Net + DeltaFS + .hsapp Launcher)
+# Full M6 RC verification (Graphics FB + USB HID + RT Audio + USB-Net + DeltaFS + Terminal + Launcher)
 ./test-rc1.sh --auto
+
+# Build a local real-hardware test microSD .img under target/ (never creates releases/ or GitHub releases)
+./build-test-image.sh --board raspi3b --uart mini
 
 # Full CI pipeline (check + unit + smoke)
 ./delta.sh ci

@@ -8,11 +8,13 @@ hollow-star-os-plus/
 ├── .github/workflows/        # GitHub Actions CI/CD (testy QEMU + budowanie i publikacja obrazów)
 ├── .gitignore                # Reguły ignorowania artefaktów kompilacji, obrazów i first-prompt.txt
 ├── delta.sh                  # Główny skrypt build/check/unit/smoke/ci
-├── test-rc1.sh               # Skrypt testowy RC1 (grafika FB, audio RT, usb-net, DeltaFS, Launcher)
-├── run-gui.sh                # Interaktywne uruchomienie GUI QEMU + klawiatura w terminalu + audio
+├── test-rc1.sh               # Skrypt testowy RC (grafika FB, USB HID, audio RT, usb-net, DeltaFS, Terminal)
+├── run-gui.sh                # Interaktywne uruchomienie GUI QEMU (cocoa zoom-to-fit + USB kbd + UART + audio)
+├── build-test-image.sh       # Lokalny kreator obrazów testowych SD dla realnego sprzętu (RPi 3B / Zero 2 W -> target/)
 ├── run-qemu.sh               # Wrapper uruchamiający obraz w qemu-system-aarch64 (-M raspi3b)
 ├── tools/
-│   └── mk_sdcard.py          # Generator obrazu karty SD (MBR: /boot FAT32 + /system DeltaFS + /user DeltaFS)
+│   ├── mk_sdcard.py          # Generator obrazu SD dla QEMU (/boot FAT32/VFAT + /system DeltaFS + /user DeltaFS)
+│   └── mk_hw_image.py        # Builder lokalnych obrazów sprzętowych .img z firmware RPi (bez releases/GH Release)
 ├── docs/
 │   ├── architecture.md       # Specyfikacja IPC, Shm, capabilities i mikrojądra Delta
 │   ├── scheduler.md          # Projekt planisty inspirowanego BeOS
@@ -26,13 +28,19 @@ hollow-star-os-plus/
 │   ├── drv-uart/             # Serwer UART (EL0, svc.uart)
 │   ├── drv-fb/               # Serwer Framebuffer/Mailbox (EL0, svc.fb, 640x480@32bpp)
 │   ├── drv-sd/               # Sterownik SD / eMMC (EL0, svc.sd, Arasan EMMC + IRQ 62)
-│   └── drv-audio/            # Serwer Audio Real-Time (EL0, Priority 110, svc.audio)
-├── fs/                       # Serwer VFS + systemy plików (MBR, FAT32, DeltaFS WAL, ext2, /dev, /proc)
+│   ├── drv-audio/            # Serwer Audio Real-Time (EL0, Priority 110, svc.audio)
+│   └── drv-kbd/              # Serwer USB HID Keyboard (EL0, DWC2 DMA + hub, svc.kbd)
+├── fs/                       # Serwer VFS + systemy plików (MBR, FAT32/VFAT, DeltaFS WAL, ext2, /dev, /proc)
 ├── userland/
 │   ├── delta-abi/            # Współdzielone numery syscalli, błędy i struktury IPC/Shm (no_std)
 │   ├── libdelta/             # Syscalle (svc #0), IPC, Shm, VFS API, CRT0 _start
+│   ├── libdelta-ui/          # Współdzielona biblioteka UI: czcionka Calibri + Monospace 8x14, Canvas, DesktopClient
 │   ├── init/                 # Pierwszy proces EL0 sprawdzający serwery i uruchamiający /system/bin/shell.elf
 │   └── shell/                # Interaktywna powłoka Unix-like ładowana z /system DeltaFS
 └── apps/
-    ├── hello/                # Przykładowa aplikacja paczkowana jako Hello.hsapp/ (Assets/, exec, icon.png)
-    └── hollow-star/          # Kompozytor Desktop, 1st Setup i aplikacje systemowe (HollowStar.hsapp/)
+    ├── compositor/           # Modularny kompozytor Desktop EL0 (/system/bin/compositor.elf, svc.desktop)
+    ├── setup/                # Kreator pierwszej konfiguracji (Setup.hsapp/)
+    ├── launcher/             # Modularny launcher siatki aplikacji (Launcher.hsapp/)
+    ├── terminal/             # Graficzny emulator terminala 8x14 monospace (Terminal.hsapp/)
+    ├── hollow-star/          # Zestaw aplikacji systemowych: SysInfo/Notes/Files/Media/Calc/Games/Settings (Apps.hsapp/)
+    └── hello/                # Przykładowa aplikacja paczkowana jako Hello.hsapp/ (Assets/, exec, icon.png)

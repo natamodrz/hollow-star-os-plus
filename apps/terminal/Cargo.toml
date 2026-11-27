@@ -1,0 +1,16 @@
+[package]
+name = "terminal-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hollow Star OS+ Graphical Terminal Emulator (.hsapp)"
+
+[[bin]]
+name = "terminal"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }
+libdelta-ui = { path = "../../userland/libdelta-ui" }

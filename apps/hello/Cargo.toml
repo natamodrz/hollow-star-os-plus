@@ -3,7 +3,7 @@ name = "hello-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Demo .hsapp EL0 application loaded from FAT32 SD card"
+description = "Demo .hsapp EL0 application loaded from System DeltaFS"
 
 [[bin]]
 name = "hello"
@@ -13,3 +13,4 @@ bench = false
 
 [dependencies]
 libdelta = { path = "../../userland/libdelta" }
+libdelta-ui = { path = "../../userland/libdelta-ui" }

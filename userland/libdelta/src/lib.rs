@@ -13,7 +13,7 @@ use delta_abi::{
     AudioMmioInfo, DmaPageInfo, FbMmioInfo, IpcMessage, MSG_UART_WRITE, MSG_VFS_EXPAND_USER,
     MSG_VFS_MKDIR, MSG_VFS_READ_FILE, MSG_VFS_READDIR, MSG_VFS_REMOVE, MSG_VFS_STAT,
     MSG_VFS_STATFS, MSG_VFS_WRITE_FILE, SVC_UART, SVC_VFS, SdMmioInfo, SysCaps, SyscallId,
-    UartMmioInfo, VfsPacket, VfsPartitionStat, pack_msg, unpack_msg,
+    UartMmioInfo, UsbMmioInfo, VfsPacket, VfsPartitionStat, pack_msg, unpack_msg,
 };
 
 /// Raw AArch64 `svc #0` with up to 4 arguments.
@@ -272,6 +272,23 @@ pub fn audio_mmio_info() -> Result<AudioMmioInfo, isize> {
     let mut info = AudioMmioInfo { virt_base: 0 };
     to_result(syscall4(
         SyscallId::GetAudioMmioInfo,
+        core::ptr::from_mut(&mut info) as usize,
+        0,
+        0,
+        0,
+    ))?;
+    Ok(info)
+}
+
+/// Retrieves isolated USB Host (`DWC2`) MMIO + IRQ info (`drv-kbd` capability).
+pub fn usb_mmio_info() -> Result<UsbMmioInfo, isize> {
+    let mut info = UsbMmioInfo {
+        virt_base: 0,
+        irq_num: 0,
+        _pad: 0,
+    };
+    to_result(syscall4(
+        SyscallId::GetUsbMmioInfo,
         core::ptr::from_mut(&mut info) as usize,
         0,
         0,

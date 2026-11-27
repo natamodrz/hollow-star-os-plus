@@ -27,9 +27,11 @@ const TAG_SET_PHYS_WH: u32 = 0x0004_8003;
 const TAG_SET_VIRT_WH: u32 = 0x0004_8004;
 const TAG_SET_DEPTH: u32 = 0x0004_8005;
 const TAG_SET_PIXEL_ORDER: u32 = 0x0004_8006;
+const TAG_SET_VIRTUAL_OFFSET: u32 = 0x0004_8009;
 const TAG_ALLOC_BUFFER: u32 = 0x0004_0001;
 const TAG_GET_PITCH: u32 = 0x0004_0008;
 const TAG_GET_TEMP: u32 = 0x0003_0006;
+const TAG_SET_POWER_STATE: u32 = 0x0002_8001;
 
 struct MailboxFb {
     mbox_va: usize,
@@ -119,6 +121,12 @@ impl MailboxFb {
         put(&mut idx, 8);
         put(&mut idx, FB_WIDTH);
         put(&mut idx, FB_HEIGHT);
+        // Set Virtual Offset (0, 0) for clean scanout origin
+        put(&mut idx, TAG_SET_VIRTUAL_OFFSET);
+        put(&mut idx, 8);
+        put(&mut idx, 8);
+        put(&mut idx, 0);
+        put(&mut idx, 0);
         // Set Depth
         put(&mut idx, TAG_SET_DEPTH);
         put(&mut idx, 4);
@@ -167,6 +175,20 @@ impl MailboxFb {
             self.fb_bytes = fb_size as usize;
             self.hw_active = true;
         }
+    }
+
+    fn init_usb_power(&mut self) {
+        let dma = self.dma_va as *mut u32;
+        // SAFETY: `dma` maps a 4 KiB Non-Cacheable DMA page.
+        unsafe {
+            write_volatile(dma.add(2), TAG_SET_POWER_STATE);
+            write_volatile(dma.add(3), 8);
+            write_volatile(dma.add(4), 8);
+            write_volatile(dma.add(5), 3); // Device ID 3 = USB HCD
+            write_volatile(dma.add(6), 3); // Bit 0 = On, Bit 1 = Wait until powered
+            write_volatile(dma.add(7), 0);
+        }
+        let _ = self.call_property(8);
     }
 
     fn read_soc_temp_mc(&mut self) -> i32 {
@@ -264,6 +286,7 @@ fn delta_main() -> usize {
         cached_shm_size: 0,
     };
     fb.init_framebuffer();
+    fb.init_usb_power();
 
     let Ok(port) = libdelta::port_create(16) else {
         return 3;
@@ -285,9 +308,19 @@ fn delta_main() -> usize {
             continue;
         }
 
-        let Some(mut pkt) = unpack_msg::<FbPacket>(&msg) else {
-            continue;
-        };
+        let mut pkt = unpack_msg::<FbPacket>(&msg).unwrap_or(FbPacket {
+            shm_id: 0,
+            width: 0,
+            height: 0,
+            pitch: 0,
+            bpp: 0,
+            shm_bytes: 0,
+            soc_temp_mc: 0,
+            brightness: 100,
+            hw_active: 0,
+            _pad: [0; 2],
+            status: errno::EINVAL as i32,
+        });
 
         match msg.tag {
             MSG_FB_GET_INFO => {

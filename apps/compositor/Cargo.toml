@@ -1,0 +1,16 @@
+[package]
+name = "compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hollow Star OS+ EL0 Desktop Compositor (svc.desktop, Status Bar, USB/UART Input, .hsapp Orchestrator)"
+
+[[bin]]
+name = "compositor"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libdelta = { path = "../../userland/libdelta" }
+libdelta-ui = { path = "../../userland/libdelta-ui" }

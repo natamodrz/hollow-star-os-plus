@@ -13,13 +13,19 @@ members = [
     "drivers/drv-sd",
     "drivers/drv-fb",
     "drivers/drv-audio",
+    "drivers/drv-kbd",
     "fs",
+    "userland/libdelta-ui",
     "apps/hello",
+    "apps/compositor",
+    "apps/setup",
+    "apps/launcher",
+    "apps/terminal",
     "apps/hollow-star",
 ]
 
 [workspace.package]
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 

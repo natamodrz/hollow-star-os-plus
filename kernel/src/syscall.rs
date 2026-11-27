@@ -3,7 +3,8 @@
 use core::mem::size_of;
 
 use delta_abi::{
-    AudioMmioInfo, FbMmioInfo, IpcMessage, SdMmioInfo, SysCaps, SyscallId, UartMmioInfo, errno,
+    AudioMmioInfo, FbMmioInfo, IpcMessage, SdMmioInfo, SysCaps, SyscallId, UartMmioInfo,
+    UsbMmioInfo, errno,
 };
 use hal_core::{InterruptController, PAGE_SIZE};
 
@@ -193,6 +194,15 @@ pub fn dispatch(tf: &TrapFrame) -> isize {
                 return errno::EPERM;
             };
             match copy_struct_to_user::<AudioMmioInfo>(ttbr0, a0, &info) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        SyscallId::GetUsbMmioInfo => {
+            let Some(info) = proc::usb_mmio_info(pid) else {
+                return errno::EPERM;
+            };
+            match copy_struct_to_user::<UsbMmioInfo>(ttbr0, a0, &info) {
                 Ok(()) => 0,
                 Err(e) => e,
             }

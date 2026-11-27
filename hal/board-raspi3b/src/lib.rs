@@ -39,6 +39,10 @@ pub const EMMC_BASE: usize = PERIPHERAL_BASE + 0x0030_0000;
 pub const MAILBOX_BASE: usize = PERIPHERAL_BASE + 0x0000_B880;
 /// BCM2837 PWM0 audio controller base address (`0x3F20_C000`).
 pub const PWM_BASE: usize = PERIPHERAL_BASE + 0x0020_C000;
+/// BCM2837 Synopsys DWC2 USB OTG controller base (`0x3F98_0000`, `16 KiB` covers core/host/DFIFO0).
+pub const USB_DWC2_BASE: usize = PERIPHERAL_BASE + 0x0098_0000;
+pub const USB_DWC2_SIZE: usize = 0x4000;
+pub const USB_DWC2_IRQ: u32 = 9;
 /// BCM2837 VideoCore uncached L2-bypass bus alias offset (`0xC000_0000`).
 pub const VC_BUS_ALIAS_OFFSET: usize = 0xC000_0000;
 /// BCM2837 EMMC GPU interrupt number (`IRQ2` bit `30`).
@@ -189,6 +193,13 @@ impl Board for Raspi3bBoard {
             PWM_BASE,
             PAGE_SIZE,
             MemoryKind::DeviceMmio,
+        ))
+    }
+
+    fn usb_mmio_region(&self) -> Option<(MemoryRegion, u32)> {
+        Some((
+            MemoryRegion::new(USB_DWC2_BASE, USB_DWC2_SIZE, MemoryKind::DeviceMmio),
+            USB_DWC2_IRQ,
         ))
     }
 
