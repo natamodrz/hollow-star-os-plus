@@ -66,7 +66,7 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
 - **Zakres:**
   - Sterownik SD/eMMC w przestrzeni użytkownika (`drivers/drv-sd`, EMMC / SDHOST na RPi 3B oraz RPi Zero 2 W) komunikujący się przez IRQ forwarding i współdzielone bufory pamięci.
   - Serwer VFS (`fs/`) z obsługą `FAT32` i `ext2`, montowaniem drzewa katalogów, `/dev` oraz `/proc`.
-  - Loader binarnych plików ELF (`userland/libdelta` + `init`) ładujący programy i serwery bezpośrednio z systemu plików.
+  - Loader binarnych plików ELF (`userland/libdelta` + `init`) ładujący programy, serwery oraz paczki aplikacji `<AppName>.hsapp/exec` bezpośrednio z systemu plików.
   - Rozszerzenie `libdelta` o ergonomiczny interfejs plikowy (deskryptory, ścieżki, sygnały).
 - **Kryterium akceptacji:** uruchomienie procesu powłoki (`userland/shell`) z obrazu karty SD pod QEMU `raspi3b` oraz odczyt/zapis testowego pliku na partycji FAT32.
 
@@ -77,5 +77,5 @@ Dokument definiuje wszystkie kamienie milowe projektu od pierwszego uruchomienia
   - Sterownik graficzny `drivers/drv-fb` (Mailbox Property Interface + Framebuffer HDMI/DSI/SPI) oraz kompozytor okien o ostrej retro-estetyce (brak zaokrągleń, pasek statusu, czcionka monospace).
   - Sterownik audio `drivers/drv-audio` (PWM/jack 3.5 mm / HDMI / BT na obsługiwanych wariantach) działający na priorytetach **Real-Time (`100..=120`)** planisty Delta.
   - Obsługa klawiatury/wejścia oraz obsługa płytek z `board-raspi02w` (adaptacja opcji bezprzewodowych: ukrywanie Wi-Fi/BT/FTP na wariantach bez modułu radiowego).
-  - Pełna lokalizacja **`English` (domyślny) + `Polski`**, kreator **`1st Setup`** (język → Wi-Fi jeśli dostępne → czas → ekran powitalny z logo Hollow Star), uniwersalna pomoc pod **`F1`** oraz aplikacje z `FEATURES_AND_UX.md` (`Sys Info`, `Markdown Notes`, `File Explorer`, `MP3/Media Player`, `Calculator`, gry).
+  - Pełna lokalizacja **`English` (domyślny) + `Polski`**, kreator **`1st Setup`** (język → Wi-Fi jeśli dostępne → czas → ekran powitalny z logo Hollow Star), uniwersalna pomoc pod **`F1`**, obsługa paczek aplikacji **`.hsapp`** (`Assets/`, `exec` ELF, `icon.png`) w launcherze oraz aplikacje z `FEATURES_AND_UX.md` (`Sys Info`, `Markdown Notes`, `File Explorer`, `MP3/Media Player`, `Calculator`, gry).
 - **Kryterium akceptacji:** pełny start graficzny z kreatorem `1st Setup` i testem odtwarzania audio bez przycięć pod obciążeniem UI w QEMU oraz na fizycznym Raspberry Pi 3B / Zero 2 W; wydanie pierwszego pełnego obrazu `.img` przez **GitHub Releases** (`gh release create`).

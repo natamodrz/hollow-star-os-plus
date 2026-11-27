@@ -27,4 +27,4 @@ hollow-star-os-plus/
 │   ├── libdelta/             # Syscalle, IPC, wątki, interfejs POSIX/Unix-like
 │   ├── init/                 # Pierwszy proces uruchamiający serwery systemowe
 │   └── shell/                # Interaktywna powłoka Unix-like
-└── apps/                     # Aplikacje systemowe i użytkownika (notatnik MD, multimedia, gry)
+└── apps/                     # Aplikacje w paczkach <App>.hsapp/ (Assets/, exec [ELF], icon.png)

@@ -68,7 +68,23 @@ Komunikacja między serwerami sterowników, systemami plików i aplikacjami opie
 
 ---
 
-## 5. Ścieżka rozwojowa (Milestones)
+## 5. Format paczek aplikacji (`.hsapp`)
+
+Aplikacje w przestrzeni użytkownika (`apps/`) są dystrybuowane i uruchamiane jako samowystarczalne katalogi-paczki wzorowane na paczkach `.app` z systemu macOS:
+
+```text
+<AppName>.hsapp/
+├── Assets/       # Biblioteki, ikony wewnętrzne, tekstury, dźwięki i zasoby aplikacji
+├── exec          # Główny plik wykonywalny programu (binarka ELF AArch64 dla EL0)
+└── icon.png      # Ikona aplikacji wyświetlana przez launcher i eksplorator plików
+```
+
+- **Uruchamianie (od M5/M6):** loader ELF oraz launcher systemowy rozpoznają katalogi z rozszerzeniem `.hsapp`, ładują binarkę `<AppName>.hsapp/exec` do nowej przestrzeni `TTBR0_EL1` w EL0 i udostępniają ścieżkę do `<AppName>.hsapp/Assets/` jako katalog zasobów procesu.
+- **Prezentacja w UI:** eksplorator plików oraz menu startowe traktują `<AppName>.hsapp` jako pojedynczy program z ikoną `icon.png` (z możliwością podglądu zawartości paczki jako katalogu na żądanie).
+
+---
+
+## 6. Ścieżka rozwojowa (Milestones)
 
 Szczegółowy opis wszystkich kamieni milowych znajduje się w [docs/MILESTONES.md](MILESTONES.md):
 

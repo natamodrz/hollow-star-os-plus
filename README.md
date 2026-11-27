@@ -23,7 +23,7 @@ A modular, Unix-like operating system written in **Rust** (`no_std` **Delta Micr
 - **Userspace Parity with Hollow Star OS Basic (`userland/`, `apps/`, planned M5–M6):**
   - **First-Time Setup Wizard:** Language (`English` default / `Polski`) → Wi-Fi *(wireless boards only)* → Time → Hollow Star welcome screen.
   - **Board Capability Adaptation:** Wireless/Bluetooth/FTP features are cleanly disabled and hidden from UI/menus on non-wireless builds or hardware variants without wireless radios.
-  - **Core Apps:** Dual/multi-drive File Explorer, Markdown Notes (`.md` + preview), System Info Monitor, Expression Calculator, Media/MP3 Player leveraging Delta RT audio priorities, Classic Games, and universal `F1` help overlays.
+  - **Core Apps & `.hsapp` Bundles:** Self-contained macOS-style `<AppName>.hsapp/` bundles (`Assets/` for libraries/icons/textures, `exec` ELF binary, `icon.png` app icon), powering the dual/multi-drive File Explorer, Markdown Notes (`.md` + preview), System Info Monitor, Expression Calculator, Media/MP3 Player leveraging Delta RT audio priorities, Classic Games, and universal `F1` help overlays.
 
 ---
 
