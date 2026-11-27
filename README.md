@@ -77,11 +77,11 @@ This repository follows strict **Semantic Versioning** (`MAJOR.MINOR.PATCH`):
 # Non-blocking QEMU raspi3b boot smoke test
 ./delta.sh smoke
 
+# Interactive QEMU GUI window with Graphics, CoreAudio, USB-Net & instant keyboard navigation
+./run-gui.sh
+
 # Full M6 RC1 verification (Graphics FB + RT Audio + USB-Net + DeltaFS + .hsapp Launcher)
 ./test-rc1.sh --auto
-
-# Interactive QEMU GUI window with Graphics, CoreAudio, USB-Net & USB Keyboard
-./test-rc1.sh --gui
 
 # Full CI pipeline (check + unit + smoke)
 ./delta.sh ci
