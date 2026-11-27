@@ -8,8 +8,11 @@
 
 use libdelta_ui::calibri::MONO_WIDTH;
 use libdelta_ui::delta_abi::{KeyCode, SVC_VFS, SysCaps, VfsPartitionStat};
-use libdelta_ui::gfx::{ACCENT, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL, TEXT, WARN_RED};
-use libdelta_ui::{BufWriter, DesktopClient, OsConfig, tr};
+use libdelta_ui::gfx::{
+    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL,
+    PANEL_ALT, TEXT, WARN_RED,
+};
+use libdelta_ui::{ArcSharpStyle, BufWriter, DesktopClient, OsConfig, tr};
 
 const MAX_COLS: usize = 74;
 const VIEW_ROWS: usize = 20;
@@ -401,7 +404,16 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
     c.clear(BG);
 
     // Header chrome (Calibri proportional font)
-    c.draw_box(12, 8, (APP_W - 24) as i32, 34, PANEL, ACCENT);
+    c.draw_arc_box(
+        12,
+        8,
+        (APP_W - 24) as i32,
+        34,
+        ArcSharpStyle::cyberdeck_card(),
+        PANEL,
+        ACCENT_BLUE,
+        ACCENT_MAGENTA,
+    );
     c.draw_text(
         24,
         18,
@@ -410,7 +422,7 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
             "Terminal Emulator (Monospace 8x14)",
             "Emulator Terminala (Monospace 8x14)",
         ),
-        ACCENT,
+        ACCENT_BLUE,
     );
     c.draw_text_right(
         (APP_W - 24) as i32,
@@ -419,8 +431,8 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
         MUTED,
     );
 
-    // Console body
-    c.draw_box(12, 48, (APP_W - 24) as i32, 368, 0x0007_0A0F, BORDER);
+    // Console body (lightened slate terminal surface matching #131926 theme)
+    c.draw_box(12, 48, (APP_W - 24) as i32, 368, 0x000F_1420, BORDER);
 
     let visible = term.count.min(VIEW_ROWS);
     let skip = term.count.saturating_sub(VIEW_ROWS);
@@ -435,14 +447,14 @@ fn render_terminal(desktop: &mut DesktopClient, cfg: &OsConfig, term: &Terminal)
     }
 
     // Active prompt line at bottom of terminal viewport
-    c.fill_rect(14, 386, (APP_W - 28) as i32, 24, 0x000C_121B);
-    c.draw_mono_text(22, 391, "delta> ", OK_GREEN);
+    c.fill_rect(14, 386, (APP_W - 28) as i32, 24, PANEL_ALT);
+    c.draw_mono_text(22, 391, "delta> ", ACCENT_BLUE);
     let input_str = core::str::from_utf8(&term.input[..term.input_len]).unwrap_or("");
     c.draw_mono_text(22 + 7 * MONO_WIDTH, 391, input_str, TEXT);
 
     if term.cursor_vis {
         let cur_x = 22 + (7 + term.input_len as i32) * MONO_WIDTH;
-        c.fill_rect(cur_x.min(610), 392, MONO_WIDTH - 1, 13, ACCENT);
+        c.fill_rect(cur_x.min(610), 392, MONO_WIDTH - 1, 13, ACCENT_MAGENTA);
     }
 
     c.draw_text(

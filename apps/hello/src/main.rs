@@ -6,8 +6,11 @@
 //! headless CLI execution and interactive Desktop `.hsapp` presentation.
 
 use libdelta_ui::delta_abi::{KeyCode, SVC_DESKTOP, SVC_VFS};
-use libdelta_ui::gfx::{ACCENT, APP_H, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL, TEXT};
-use libdelta_ui::{DesktopClient, IconKind, draw_icon_2x};
+use libdelta_ui::gfx::{
+    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_H, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL,
+    TEXT,
+};
+use libdelta_ui::{ArcSharpStyle, DesktopClient, IconKind, draw_icon_2x};
 
 #[unsafe(no_mangle)]
 fn delta_main() -> usize {
@@ -38,16 +41,18 @@ fn delta_main() -> usize {
     {
         let c = &mut desktop.canvas;
         c.clear(BG);
-        c.draw_box(
+        c.draw_arc_box(
             56,
             54,
             (APP_W - 112) as i32,
             (APP_H - 108) as i32,
+            ArcSharpStyle::modal(),
             PANEL,
-            ACCENT,
+            ACCENT_BLUE,
+            ACCENT_MAGENTA,
         );
-        draw_icon_2x(c, 84, 82, IconKind::Hsapp, ACCENT);
-        c.draw_text_scaled(132, 86, "Hello.hsapp Bundle Inspector", ACCENT, 1);
+        draw_icon_2x(c, 84, 82, IconKind::Hsapp, ACCENT_BLUE);
+        c.draw_text_scaled(132, 86, "Hello.hsapp Bundle Inspector", ACCENT_BLUE, 1);
         c.draw_text(
             132,
             110,

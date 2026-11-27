@@ -16,8 +16,11 @@ use libdelta_ui::delta_abi::{
     AudioPacket, FbPacket, IpcMessage, KeyCode, MSG_AUDIO_PLAY_TONE, MSG_FB_GET_INFO, SVC_AUDIO,
     SVC_FB, SVC_VFS, SysCaps, VfsPartitionStat, pack_msg, unpack_msg,
 };
-use libdelta_ui::gfx::{ACCENT, APP_W, BG, BORDER, CYAN, Canvas, MUTED, OK_GREEN, PANEL, TEXT};
-use libdelta_ui::{BufWriter, DesktopClient, Lang, OsConfig, tr, wireless_enabled};
+use libdelta_ui::gfx::{
+    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, CYAN, Canvas, MUTED, OK_GREEN, PANEL,
+    PANEL_ALT, TEXT,
+};
+use libdelta_ui::{ArcSharpStyle, BufWriter, DesktopClient, Lang, OsConfig, tr, wireless_enabled};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AppMode {
@@ -530,8 +533,17 @@ fn render_app(c: &mut Canvas, app: &AppState) {
 }
 
 fn draw_app_header(c: &mut Canvas, title: &str, hint: &str) {
-    c.draw_box(16, 10, (APP_W - 32) as i32, 40, PANEL, ACCENT);
-    c.draw_text(28, 23, title, ACCENT);
+    c.draw_arc_box(
+        16,
+        10,
+        (APP_W - 32) as i32,
+        40,
+        ArcSharpStyle::cyberdeck_card(),
+        PANEL,
+        ACCENT_BLUE,
+        ACCENT_MAGENTA,
+    );
+    c.draw_text(28, 23, title, ACCENT_BLUE);
     c.draw_text_right((APP_W - 28) as i32, 23, hint, MUTED);
 }
 
@@ -705,7 +717,7 @@ fn render_files(c: &mut Canvas, app: &AppState, lang: Lang) {
         }
         let selected = idx == app.file_sel;
         if selected {
-            c.fill_rect(20, y - 2, 282, 20, 0x001E_2838);
+            c.fill_rect(20, y - 2, 282, 20, PANEL_ALT);
         }
         c.draw_text(28, y, line, if selected { ACCENT } else { TEXT });
         y += 22;

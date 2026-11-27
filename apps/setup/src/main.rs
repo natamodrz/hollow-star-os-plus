@@ -5,8 +5,10 @@
 //! Standalone `1st Setup` Wizard (`/system/apps/Setup.hsapp/exec`).
 
 use libdelta_ui::delta_abi::{KeyCode, SVC_VFS, SysCaps};
-use libdelta_ui::gfx::{ACCENT, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL, TEXT};
-use libdelta_ui::{BufWriter, DesktopClient, Lang, OsConfig, tr, wireless_enabled};
+use libdelta_ui::gfx::{
+    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL, TEXT,
+};
+use libdelta_ui::{ArcSharpStyle, BufWriter, DesktopClient, Lang, OsConfig, tr, wireless_enabled};
 
 #[unsafe(no_mangle)]
 fn delta_main() -> usize {
@@ -135,8 +137,17 @@ fn render_setup(
     c.clear(BG);
 
     // Outer setup card
-    c.draw_box(24, 18, (APP_W - 48) as i32, 412, PANEL, ACCENT);
-    c.draw_hollow_star(56, 48, 13, ACCENT);
+    c.draw_arc_box(
+        24,
+        18,
+        (APP_W - 48) as i32,
+        412,
+        ArcSharpStyle::modal(),
+        PANEL,
+        ACCENT_BLUE,
+        ACCENT_MAGENTA,
+    );
+    c.draw_arc_star(56, 48, 13, ACCENT_BLUE, ACCENT_MAGENTA);
     c.draw_text_scaled(
         82,
         36,
@@ -154,13 +165,16 @@ fn render_setup(
     sw.str(tr(lang, "Step ", "Krok "));
     sw.u32((step + 1) as u32);
     sw.str(" / 3");
-    c.draw_text_right((APP_W - 42) as i32, 36, sw.as_str(), ACCENT);
+    c.draw_text_right((APP_W - 42) as i32, 36, sw.as_str(), ACCENT_MAGENTA);
 
     // Progress bar across 3 steps
     for idx in 0..3i32 {
         let bx = 46 + idx * 184;
-        let fill = if idx <= step as i32 { ACCENT } else { BORDER };
-        c.fill_rect(bx, 68, 174, 4, fill);
+        if idx <= step as i32 {
+            c.fill_gradient_h(bx, 68, 174, 4, ACCENT_BLUE, ACCENT_MAGENTA);
+        } else {
+            c.fill_rect(bx, 68, 174, 4, BORDER);
+        }
     }
 
     match step {

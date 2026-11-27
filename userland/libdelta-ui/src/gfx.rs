@@ -1,6 +1,9 @@
-//! Sharp-edged pixel canvas (`XRGB8888`) backed by `Shm` with Calibri & Monospace rendering.
+//! Modernized Hollow Star UI pixel canvas (`XRGB8888`) backed by `Shm`
+//! featuring lightened slate palette (`#131926`/`#1B2336`), Light Blue (`#5CE1E6`) +
+//! Magenta (`#F72585`) accents, Arc-Sharp geometry, frosted blur, and Calibri/Monospace fonts.
 
 use crate::calibri::{FONT_HEIGHT, MONO_WIDTH, glyph_calibri, glyph_mono, measure_calibri};
+use crate::fx::{ArcSharpStyle, Rect, blur_tinted_panel, lerp_color, point_in_arc_sharp};
 
 pub const FB_W: usize = 640;
 pub const FB_H: usize = 480;
@@ -8,17 +11,39 @@ pub const BAR_H: usize = 28;
 pub const APP_W: usize = 640;
 pub const APP_H: usize = FB_H - BAR_H;
 
-pub const BG: u32 = 0x000A_0E14;
-pub const PANEL: u32 = 0x0012_1822;
-pub const PANEL_ALT: u32 = 0x0017_1F2C;
-pub const ACCENT: u32 = 0x00F4_B41A;
-pub const ACCENT_DIM: u32 = 0x008A_6510;
-pub const BORDER: u32 = 0x003D_4B60;
-pub const TEXT: u32 = 0x00E6_EDF3;
-pub const MUTED: u32 = 0x008B_949E;
+/// Lightened deep-slate canvas background (`#131926`).
+pub const BG: u32 = 0x0013_1926;
+/// Elevated panel / tile surface (`#1B2336`).
+pub const PANEL: u32 = 0x001B_2336;
+/// Frosted / hover elevated surface (`#222C42`).
+pub const PANEL_ALT: u32 = 0x0022_2C42;
+/// Subtle structural border (`#384766`).
+pub const BORDER: u32 = 0x0038_4766;
+
+/// Primary Light Blue / Sky-Cyan accent (`#5CE1E6`).
+pub const ACCENT_BLUE: u32 = 0x005C_E1E6;
+/// Muted Light Blue accent (`#2B6F80`).
+pub const ACCENT_BLUE_DIM: u32 = 0x002B_6F80;
+/// Secondary Magenta accent (`#F72585`).
+pub const ACCENT_MAGENTA: u32 = 0x00F7_2585;
+/// Muted Magenta accent (`#7A1D54`).
+pub const ACCENT_MAGENTA_DIM: u32 = 0x007A_1D54;
+
+/// Canonical primary accent alias (Light Blue).
+pub const ACCENT: u32 = ACCENT_BLUE;
+/// Canonical dim accent alias (Muted Light Blue).
+pub const ACCENT_DIM: u32 = ACCENT_BLUE_DIM;
+/// Secondary Magenta alias.
+pub const MAGENTA: u32 = ACCENT_MAGENTA;
+/// Light Blue alias.
+pub const CYAN: u32 = ACCENT_BLUE;
+
+/// Primary crisp foreground text (`#EDF2FA`).
+pub const TEXT: u32 = 0x00ED_F2FA;
+/// Secondary muted text (`#94A3B8`).
+pub const MUTED: u32 = 0x0094_A3B8;
 pub const OK_GREEN: u32 = 0x003F_B950;
-pub const WARN_RED: u32 = 0x00F8_5149;
-pub const CYAN: u32 = 0x0058_A6FF;
+pub const WARN_RED: u32 = 0x00FF_5370;
 
 pub struct Canvas {
     buf: &'static mut [u32],
@@ -80,9 +105,102 @@ impl Canvas {
         self.fill_rect(x + w - 1, y, 1, h, color);
     }
 
+    /// Draws an Arc-Sharp stylized box (rounded arcs meeting sharp pointed cusps) cleanly
+    /// matching the Hollow Star aesthetic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_arc_box(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        style: ArcSharpStyle,
+        fill: u32,
+        border_a: u32,
+        border_b: u32,
+    ) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let max_sum = (w + h).max(1);
+        for ly in 0..h {
+            let py = y + ly;
+            if py < 0 || py >= self.height as i32 {
+                continue;
+            }
+            for lx in 0..w {
+                let px = x + lx;
+                if px < 0 || px >= self.width as i32 {
+                    continue;
+                }
+                if point_in_arc_sharp(lx, ly, w, h, style) {
+                    let is_edge = !point_in_arc_sharp(lx - 1, ly, w, h, style)
+                        || !point_in_arc_sharp(lx + 1, ly, w, h, style)
+                        || !point_in_arc_sharp(lx, ly - 1, w, h, style)
+                        || !point_in_arc_sharp(lx, ly + 1, w, h, style);
+                    let col = if is_edge {
+                        if border_a == border_b {
+                            border_a
+                        } else {
+                            let t = (((lx + ly) * 255) / max_sum).clamp(0, 255) as u8;
+                            lerp_color(border_a, border_b, t)
+                        }
+                    } else {
+                        fill
+                    };
+                    self.buf[(py as usize) * self.width + (px as usize)] = col;
+                }
+            }
+        }
+    }
+
+    /// Standard card/panel box — uses `ArcSharpStyle::cyberdeck_card()` so the entire OS
+    /// adopts the new Arc-Sharp logo aesthetic automatically.
     pub fn draw_box(&mut self, x: i32, y: i32, w: i32, h: i32, fill: u32, border: u32) {
-        self.fill_rect(x, y, w, h, fill);
-        self.draw_rect(x, y, w, h, border);
+        self.draw_arc_box(
+            x,
+            y,
+            w,
+            h,
+            ArcSharpStyle::cyberdeck_card(),
+            fill,
+            border,
+            border,
+        );
+    }
+
+    /// Draws a horizontal linear gradient bar between `c0` and `c1`.
+    pub fn fill_gradient_h(&mut self, x: i32, y: i32, w: i32, h: i32, c0: u32, c1: u32) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let denom = (w - 1).max(1);
+        for lx in 0..w {
+            let t = ((lx * 255) / denom).clamp(0, 255) as u8;
+            let col = lerp_color(c0, c1, t);
+            self.fill_rect(x + lx, y, 1, h, col);
+        }
+    }
+
+    /// Applies frosted glass blur tinted with `tint` over `rect`.
+    pub fn blur_tinted(
+        &mut self,
+        rect: Rect,
+        radius: usize,
+        tint: u32,
+        alpha: u8,
+        scratch: &mut [u32],
+    ) {
+        blur_tinted_panel(
+            self.buf,
+            self.width,
+            self.height,
+            rect,
+            radius,
+            tint,
+            alpha,
+            scratch,
+        );
     }
 
     pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: u32) {
@@ -108,35 +226,49 @@ impl Canvas {
         }
     }
 
-    /// Draws the 5-pointed **Hollow Star** emblem centered at `(cx, cy)`.
-    pub fn draw_hollow_star(&mut self, cx: i32, cy: i32, r_outer: i32, color: u32) {
-        let r_inner = (r_outer * 38) / 100;
-        const UNIT_10: [(i32, i32); 10] = [
-            (0, -256),
-            (150, -207),
-            (243, -79),
-            (243, 79),
-            (150, 207),
-            (0, 256),
-            (-150, 207),
-            (-243, 79),
-            (-243, -79),
-            (-150, -207),
-        ];
-        let mut coords = [(0i32, 0i32); 10];
-        for i in 0..10 {
-            let r = if i % 2 == 0 { r_outer } else { r_inner };
-            coords[i] = (cx + (UNIT_10[i].0 * r) / 256, cy + (UNIT_10[i].1 * r) / 256);
+    /// Draws the 5-pointed **Hollow Star** emblem using smooth concave quadratic Bezier arcs
+    /// meeting at crisp, sharp star tips with a Light Blue -> Magenta gradient.
+    pub fn draw_hollow_star(&mut self, cx: i32, cy: i32, r_outer: i32, _color_unused: u32) {
+        self.draw_arc_star(cx, cy, r_outer, ACCENT_BLUE, ACCENT_MAGENTA);
+    }
+
+    /// Draws the concave-arc Hollow Star logo with an explicit two-color gradient.
+    pub fn draw_arc_star(
+        &mut self,
+        cx: i32,
+        cy: i32,
+        r_outer: i32,
+        color_blue: u32,
+        color_magenta: u32,
+    ) {
+        if r_outer <= 2 {
+            return;
         }
-        for i in 0..10 {
-            let next = (i + 1) % 10;
-            self.draw_line(
-                coords[i].0,
-                coords[i].1,
-                coords[next].0,
-                coords[next].1,
-                color,
-            );
+        const TIPS: [(i32, i32); 5] = [(0, -256), (243, -79), (150, 207), (-150, 207), (-243, -79)];
+        const CTRL: [(i32, i32); 5] = [(58, -80), (94, 31), (0, 98), (-94, 31), (-58, -80)];
+
+        for i in 0..5 {
+            let next = (i + 1) % 5;
+            let p0x = cx + (TIPS[i].0 * r_outer) / 256;
+            let p0y = cy + (TIPS[i].1 * r_outer) / 256;
+            let p1x = cx + (CTRL[i].0 * r_outer) / 256;
+            let p1y = cy + (CTRL[i].1 * r_outer) / 256;
+            let p2x = cx + (TIPS[next].0 * r_outer) / 256;
+            let p2y = cy + (TIPS[next].1 * r_outer) / 256;
+
+            let mut prev_x = p0x;
+            let mut prev_y = p0y;
+            for step in 1..=28 {
+                let t = step;
+                let inv = 28 - t;
+                let qx = (inv * inv * p0x + 2 * inv * t * p1x + t * t * p2x) / 784;
+                let qy = (inv * inv * p0y + 2 * inv * t * p1y + t * t * p2y) / 784;
+                let grad_t = (((i as i32) * 28 + step) * 255 / 140) as u8;
+                let col = lerp_color(color_blue, color_magenta, grad_t);
+                self.draw_line(prev_x, prev_y, qx, qy, col);
+                prev_x = qx;
+                prev_y = qy;
+            }
         }
     }
 

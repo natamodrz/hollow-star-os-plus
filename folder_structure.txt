@@ -34,13 +34,13 @@ hollow-star-os-plus/
 ├── userland/
 │   ├── delta-abi/            # Współdzielone numery syscalli, błędy i struktury IPC/Shm (no_std)
 │   ├── libdelta/             # Syscalle (svc #0), IPC, Shm, VFS API, CRT0 _start
-│   ├── libdelta-ui/          # Współdzielona biblioteka UI: czcionka Calibri + Monospace 8x14, Canvas, DesktopClient
+│   ├── libdelta-ui/          # Współdzielona biblioteka UI: Arc-Sharp + blur/animacje (`fx.rs`), logo Bezier, Calibri + Monospace 8x14, Canvas, DesktopClient
 │   ├── init/                 # Pierwszy proces EL0 sprawdzający serwery i uruchamiający /system/bin/shell.elf
 │   └── shell/                # Interaktywna powłoka Unix-like ładowana z /system DeltaFS
 └── apps/
-    ├── compositor/           # Modularny kompozytor Desktop EL0 (/system/bin/compositor.elf, svc.desktop)
+    ├── compositor/           # Modularny kompozytor Cyberdeck/PDA EL0 (/system/bin/compositor.elf, svc.desktop, blur modalny)
     ├── setup/                # Kreator pierwszej konfiguracji (Setup.hsapp/)
-    ├── launcher/             # Modularny launcher siatki aplikacji (Launcher.hsapp/)
+    ├── launcher/             # Pełnoekranowy launcher Cyberdeck / DIY PDA (Launcher.hsapp/)
     ├── terminal/             # Graficzny emulator terminala 8x14 monospace (Terminal.hsapp/)
     ├── hollow-star/          # Zestaw aplikacji systemowych: SysInfo/Notes/Files/Media/Calc/Games/Settings (Apps.hsapp/)
     └── hello/                # Przykładowa aplikacja paczkowana jako Hello.hsapp/ (Assets/, exec, icon.png)

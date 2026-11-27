@@ -5,8 +5,13 @@
 //! Standalone `.hsapp` Grid Launcher (`/system/apps/Launcher.hsapp/exec`).
 
 use libdelta_ui::delta_abi::{KeyCode, SVC_VFS, SysCaps};
-use libdelta_ui::gfx::{ACCENT, APP_W, BG, BORDER, CYAN, MUTED, OK_GREEN, PANEL, TEXT};
-use libdelta_ui::{BufWriter, DesktopClient, IconKind, OsConfig, draw_icon_2x, tr};
+use libdelta_ui::gfx::{
+    ACCENT_BLUE, ACCENT_MAGENTA, APP_W, BG, BORDER, MUTED, PANEL, PANEL_ALT, TEXT,
+};
+use libdelta_ui::{
+    ArcSharpStyle, BufWriter, DesktopClient, IconKind, OsConfig, draw_icon_2x, ease_out_cubic,
+    lerp_color, sleep_ms, tr,
+};
 
 struct AppEntry {
     key_hint: &'static str,
@@ -121,17 +126,29 @@ fn delta_main() -> usize {
 
     let bundle_count = count_hsapps(vfs, "/system/apps") + count_hsapps(vfs, "/user/apps");
     let mut selected = 0usize;
+    let mut prev_selected = 0usize;
     let mut dirty = true;
 
     loop {
         if dirty {
-            render_launcher(&mut desktop, &cfg, &caps, selected, bundle_count);
+            if prev_selected != selected {
+                animate_focus(
+                    &mut desktop,
+                    &cfg,
+                    &caps,
+                    prev_selected,
+                    selected,
+                    bundle_count,
+                );
+                prev_selected = selected;
+            }
+            render_launcher(&mut desktop, &cfg, &caps, selected, bundle_count, None);
             desktop.present();
             dirty = false;
         }
 
         let Some((key, ch)) = desktop.poll_key() else {
-            libdelta_ui::sleep_ms(16);
+            sleep_ms(16);
             continue;
         };
 
@@ -215,76 +232,124 @@ fn count_hsapps(vfs: usize, dir: &str) -> u32 {
     listing.lines().filter(|l| l.contains(".hsapp")).count() as u32
 }
 
+const GRID_X: i32 = 16;
+const GRID_Y: i32 = 60;
+const TILE_W: i32 = 144;
+const TILE_H: i32 = 104;
+const GAP_X: i32 = 10;
+const GAP_Y: i32 = 10;
+
+fn tile_pos(idx: usize) -> (i32, i32) {
+    let col = (idx % 4) as i32;
+    let row = (idx / 4) as i32;
+    (
+        GRID_X + col * (TILE_W + GAP_X),
+        GRID_Y + row * (TILE_H + GAP_Y),
+    )
+}
+
+fn animate_focus(
+    desktop: &mut DesktopClient,
+    cfg: &OsConfig,
+    caps: &SysCaps,
+    from: usize,
+    to: usize,
+    bundle_count: u32,
+) {
+    let (fx, fy) = tile_pos(from);
+    let (tx, ty) = tile_pos(to);
+    for step in 1..=2u32 {
+        let p = ease_out_cubic((step * 255) / 3) as i32;
+        let gx = fx + ((tx - fx) * p) / 255;
+        let gy = fy + ((ty - fy) * p) / 255;
+        let glow = lerp_color(ACCENT_MAGENTA, ACCENT_BLUE, p as u8);
+        render_launcher(desktop, cfg, caps, to, bundle_count, Some((gx, gy, glow)));
+        desktop.present();
+        sleep_ms(10);
+    }
+}
+
 fn render_launcher(
     desktop: &mut DesktopClient,
     cfg: &OsConfig,
     caps: &SysCaps,
     selected: usize,
     bundle_count: u32,
+    glide: Option<(i32, i32, u32)>,
 ) {
     let lang = cfg.lang;
     let c = &mut desktop.canvas;
     c.clear(BG);
 
-    // Header bar
-    c.draw_box(16, 10, (APP_W - 32) as i32, 42, PANEL, BORDER);
-    c.draw_text(
-        28,
-        24,
-        tr(
-            lang,
-            "App Launcher (.hsapp Grid)",
-            "Launcher Aplikacji (.hsapp)",
-        ),
-        ACCENT,
+    // Fullscreen Cyberdeck & DIY PDA Header
+    c.draw_arc_box(
+        16,
+        8,
+        (APP_W - 32) as i32,
+        44,
+        ArcSharpStyle::cyberdeck_card(),
+        PANEL,
+        ACCENT_BLUE,
+        ACCENT_MAGENTA,
     );
+    c.draw_arc_star(34, 29, 8, ACCENT_BLUE, ACCENT_MAGENTA);
+    c.draw_text(
+        50,
+        21,
+        tr(lang, "CYBERDECK LAUNCHER", "LAUNCHER CYBERDECK"),
+        ACCENT_BLUE,
+    );
+    c.fill_gradient_h(26, 48, (APP_W - 52) as i32, 2, ACCENT_BLUE, ACCENT_MAGENTA);
 
-    let mut stats = [0u8; 80];
+    let mut stats = [0u8; 96];
     let mut sw = BufWriter::new(&mut stats);
-    sw.str(tr(lang, "Bundles: ", "Pakiety: "));
+    sw.str("PDA/SBC | ");
+    sw.str(tr(lang, "Apps: ", "Pakiety: "));
     sw.u32(bundle_count);
     sw.str(" | ");
     sw.str(caps.board_name_str());
-    c.draw_text_right((APP_W - 28) as i32, 24, sw.as_str(), MUTED);
+    c.draw_text_right((APP_W - 28) as i32, 21, sw.as_str(), MUTED);
 
-    // 4 columns x 3 rows grid
-    let start_x = 16;
-    let start_y = 62;
-    let tile_w = 144;
-    let tile_h = 104;
-    let gap_x = 10;
-    let gap_y = 10;
-
+    // 4 columns x 3 rows fullscreen tile grid
     for (idx, item) in APPS.iter().enumerate() {
-        let col = (idx % 4) as i32;
-        let row = (idx / 4) as i32;
-        let x = start_x + col * (tile_w + gap_x);
-        let y = start_y + row * (tile_h + gap_y);
+        let (x, y) = tile_pos(idx);
         let active = idx == selected;
 
-        c.draw_box(
+        c.draw_arc_box(
             x,
             y,
-            tile_w,
-            tile_h,
-            if active { 0x001B_2433 } else { PANEL },
-            if active { ACCENT } else { BORDER },
+            TILE_W,
+            TILE_H,
+            ArcSharpStyle::pda_tile(),
+            if active { PANEL_ALT } else { PANEL },
+            if active { ACCENT_BLUE } else { BORDER },
+            if active { ACCENT_MAGENTA } else { BORDER },
         );
+        if active {
+            c.fill_gradient_h(
+                x + 14,
+                y + TILE_H - 8,
+                TILE_W - 28,
+                3,
+                ACCENT_BLUE,
+                ACCENT_MAGENTA,
+            );
+        }
 
         draw_icon_2x(
             c,
-            x + (tile_w - 32) / 2,
-            y + 18,
+            x + (TILE_W - 32) / 2,
+            y + 20,
             item.icon,
-            if active { ACCENT } else { TEXT },
+            if active { ACCENT_BLUE } else { TEXT },
         );
 
         let label = tr(lang, item.en, item.pl);
         c.draw_text_centered(
-            x + tile_w / 2,
+            x + TILE_W / 2,
             y + 62,
             label,
-            if active { ACCENT } else { TEXT },
+            if active { TEXT } else { MUTED },
             1,
         );
 
@@ -293,25 +358,79 @@ fn render_launcher(
         bw.str("[");
         bw.str(item.key_hint);
         bw.str("]");
-        c.draw_text(x + 8, y + 8, bw.as_str(), if active { CYAN } else { MUTED });
+        c.draw_text(
+            x + 10,
+            y + 8,
+            bw.as_str(),
+            if active { ACCENT_MAGENTA } else { MUTED },
+        );
     }
 
-    // Info card in bottom-right 12th slot (`col=3, row=2`)
-    let info_x = start_x + 3 * (tile_w + gap_x);
-    let info_y = start_y + 2 * (tile_h + gap_y);
-    c.draw_box(info_x, info_y, tile_w, tile_h, BG, BORDER);
-    c.draw_text_centered(info_x + tile_w / 2, info_y + 22, "Delta Kernel", MUTED, 1);
-    c.draw_text_centered(info_x + tile_w / 2, info_y + 44, "Modular EL0", OK_GREEN, 1);
-    c.draw_text_centered(info_x + tile_w / 2, info_y + 68, "v0.6.0-rc.2", CYAN, 1);
+    if let Some((gx, gy, glow)) = glide {
+        c.draw_arc_box(
+            gx,
+            gy,
+            TILE_W,
+            TILE_H,
+            ArcSharpStyle::pda_tile(),
+            PANEL_ALT,
+            glow,
+            ACCENT_MAGENTA,
+        );
+    }
 
-    c.draw_box(16, 408, (APP_W - 32) as i32, 34, PANEL, BORDER);
+    // Cyberdeck / PDA Identity card in bottom-right 12th slot (`col=3, row=2`)
+    let (info_x, info_y) = tile_pos(11);
+    c.draw_arc_box(
+        info_x,
+        info_y,
+        TILE_W,
+        TILE_H,
+        ArcSharpStyle::pda_tile(),
+        PANEL,
+        ACCENT_BLUE,
+        ACCENT_MAGENTA,
+    );
+    c.draw_arc_star(
+        info_x + TILE_W / 2,
+        info_y + 24,
+        9,
+        ACCENT_BLUE,
+        ACCENT_MAGENTA,
+    );
+    c.draw_text_centered(info_x + TILE_W / 2, info_y + 42, "Hollow Star+", TEXT, 1);
+    c.draw_text_centered(
+        info_x + TILE_W / 2,
+        info_y + 60,
+        "PDA / SBC Mode",
+        ACCENT_BLUE,
+        1,
+    );
+    c.draw_text_centered(
+        info_x + TILE_W / 2,
+        info_y + 78,
+        "v0.6.0-rc.2",
+        ACCENT_MAGENTA,
+        1,
+    );
+
+    c.draw_arc_box(
+        16,
+        404,
+        (APP_W - 32) as i32,
+        38,
+        ArcSharpStyle::cyberdeck_card(),
+        PANEL_ALT,
+        BORDER,
+        ACCENT_MAGENTA,
+    );
     c.draw_text_centered(
         (APP_W / 2) as i32,
-        418,
+        415,
         tr(
             lang,
-            "[Arrows/Tab] Navigate   [Enter / 1-9,0] Launch   [X/Esc] UART Shell   [F1] Help",
-            "[Strzalki/Tab] Wybor   [Enter / 1-9,0] Uruchom   [X/Esc] Konsola   [F1] Pomoc",
+            "[Arrows/Tab] Select   [Enter / 1-9,0] Launch   [X/Esc] Shell   [F1] Help",
+            "[Strzalki/Tab] Wybierz   [Enter / 1-9,0] Uruchom   [X/Esc] Konsola   [F1] Pomoc",
         ),
         TEXT,
         1,

@@ -20,10 +20,12 @@ use libdelta_ui::delta_abi::{
     SVC_KBD, SVC_UART, SVC_VFS, SysCaps, errno, pack_msg, unpack_msg,
 };
 use libdelta_ui::gfx::{
-    ACCENT, ACCENT_DIM, APP_H, APP_W, BAR_H, BG, CYAN, Canvas, FB_H, FB_W, MUTED, OK_GREEN, PANEL,
-    TEXT,
+    ACCENT, ACCENT_BLUE, ACCENT_MAGENTA, APP_H, APP_W, BAR_H, BG, CYAN, Canvas, FB_H, FB_W, MUTED,
+    OK_GREEN, PANEL, PANEL_ALT, TEXT,
 };
-use libdelta_ui::{BufWriter, Lang, OsConfig, tr, wireless_enabled};
+use libdelta_ui::{
+    ArcSharpStyle, BufWriter, Lang, OsConfig, Rect, ease_out_cubic, sleep_ms, tr, wireless_enabled,
+};
 
 #[unsafe(no_mangle)]
 fn delta_main() -> usize {
@@ -56,7 +58,8 @@ fn delta_main() -> usize {
     fb_canvas.clear(BG);
 
     let caps = libdelta::sys_caps().unwrap_or_else(|_| SysCaps::empty());
-    let mut comp = CompositorState::new(uart, vfs, fb_port, fb_shm_id, audio, caps);
+    let blur_shm = libdelta::shm_create(fb_bytes).ok();
+    let mut comp = CompositorState::new(uart, vfs, fb_port, fb_shm_id, audio, caps, blur_shm);
     comp.cfg.load_from_vfs(vfs);
     comp.temp_mc = query_soc_temp_mc(fb_port).unwrap_or(42_000);
 
@@ -188,6 +191,9 @@ fn delta_main() -> usize {
         current_arg = next_arg;
     }
 
+    if let Some((blur_id, _)) = blur_shm {
+        let _ = libdelta::shm_unmap(blur_id);
+    }
     let _ = libdelta::shm_unmap(fb_shm_id);
     0
 }
@@ -200,6 +206,7 @@ struct CompositorState {
     _audio: usize,
     kbd_port: Option<usize>,
     caps: SysCaps,
+    blur_shm: Option<(u64, usize)>,
     cfg: OsConfig,
     temp_mc: u32,
     help_open: bool,
@@ -218,6 +225,7 @@ impl CompositorState {
         fb_shm_id: u64,
         audio: usize,
         caps: SysCaps,
+        blur_shm: Option<(u64, usize)>,
     ) -> Self {
         Self {
             uart,
@@ -227,6 +235,7 @@ impl CompositorState {
             _audio: audio,
             kbd_port: libdelta::service_lookup(SVC_KBD).ok(),
             caps,
+            blur_shm,
             cfg: OsConfig::defaults(),
             temp_mc: 42_000,
             help_open: false,
@@ -236,6 +245,13 @@ impl CompositorState {
             esc_stage: 0,
             esc_idle: 0,
         }
+    }
+
+    fn blur_scratch(&self) -> Option<&'static mut [u32]> {
+        let (_, va) = self.blur_shm?;
+        // SAFETY: `blur_shm` was allocated with `FB_W * FB_H * 4` bytes, mapped into our
+        // address space, and only accessed transiently inside single-threaded compositor draws.
+        Some(unsafe { core::slice::from_raw_parts_mut(va as *mut u32, FB_W * FB_H) })
     }
 
     fn flush_fb(&self, brightness: u8) {
@@ -261,7 +277,9 @@ impl CompositorState {
     fn present_splash(&self, fb_canvas: &mut Canvas, msg: &str) {
         fb_canvas.clear(BG);
         self.draw_status_bar(fb_canvas);
-        fb_canvas.draw_text_centered((FB_W / 2) as i32, (FB_H / 2) as i32, msg, MUTED, 1);
+        fb_canvas.draw_arc_star((FB_W / 2) as i32, 192, 24, ACCENT_BLUE, ACCENT_MAGENTA);
+        fb_canvas.fill_gradient_h(210, 226, 220, 2, ACCENT_BLUE, ACCENT_MAGENTA);
+        fb_canvas.draw_text_centered((FB_W / 2) as i32, 244, msg, MUTED, 1);
         self.flush_fb(self.cfg.brightness);
     }
 
@@ -269,8 +287,31 @@ impl CompositorState {
         let lang = self.cfg.lang;
         fb_canvas.clear(BG);
         self.draw_status_bar(fb_canvas);
-        fb_canvas.draw_box(76, 130, 488, 200, PANEL, ACCENT);
-        fb_canvas.draw_hollow_star(106, 162, 11, ACCENT);
+        if let Some(scratch) = self.blur_scratch() {
+            fb_canvas.blur_tinted(
+                Rect {
+                    x: 76,
+                    y: 130,
+                    w: 488,
+                    h: 200,
+                },
+                3,
+                PANEL,
+                160,
+                scratch,
+            );
+        }
+        fb_canvas.draw_arc_box(
+            76,
+            130,
+            488,
+            200,
+            ArcSharpStyle::modal(),
+            PANEL,
+            ACCENT_BLUE,
+            ACCENT_MAGENTA,
+        );
+        fb_canvas.draw_arc_star(106, 162, 11, ACCENT_BLUE, ACCENT_MAGENTA);
         fb_canvas.draw_text(
             128,
             154,
@@ -281,6 +322,7 @@ impl CompositorState {
             ),
             ACCENT,
         );
+        fb_canvas.fill_gradient_h(96, 180, 448, 2, ACCENT_BLUE, ACCENT_MAGENTA);
         fb_canvas.draw_text(
             104,
             196,
@@ -349,10 +391,28 @@ impl CompositorState {
 
     fn draw_status_bar(&self, c: &mut Canvas) {
         c.fill_rect(0, 0, FB_W as i32, BAR_H as i32, PANEL);
-        c.fill_rect(0, (BAR_H - 1) as i32, FB_W as i32, 1, ACCENT_DIM);
+        c.fill_gradient_h(
+            0,
+            (BAR_H - 2) as i32,
+            FB_W as i32,
+            2,
+            ACCENT_BLUE,
+            ACCENT_MAGENTA,
+        );
 
-        c.draw_hollow_star(15, 14, 8, ACCENT);
-        c.draw_text(29, 7, "Hollow Star OS+", TEXT);
+        c.draw_arc_star(15, 13, 9, ACCENT_BLUE, ACCENT_MAGENTA);
+        c.draw_text(29, 6, "Hollow Star OS+", TEXT);
+        c.draw_arc_box(
+            148,
+            4,
+            82,
+            19,
+            ArcSharpStyle::pda_tile(),
+            PANEL_ALT,
+            ACCENT_BLUE,
+            ACCENT_MAGENTA,
+        );
+        c.draw_text_centered(189, 6, "CYBERDECK", ACCENT_BLUE, 1);
 
         let mut line = [0u8; 96];
         let mut w = BufWriter::new(&mut line);
@@ -378,14 +438,74 @@ impl CompositorState {
         w.u32_pad2(u32::from(self.cfg.clock_mm));
         w.str(" | [F1]");
 
-        c.draw_text_right((FB_W - 10) as i32, 7, w.as_str(), MUTED);
+        c.draw_text_right((FB_W - 10) as i32, 6, w.as_str(), MUTED);
+    }
+
+    fn animate_help_reveal(&self, fb_canvas: &mut Canvas) {
+        if let Some(scratch) = self.blur_scratch() {
+            fb_canvas.blur_tinted(
+                Rect {
+                    x: 74,
+                    y: 82,
+                    w: 492,
+                    h: 290,
+                },
+                3,
+                PANEL,
+                155,
+                scratch,
+            );
+        }
+        for step in 1..=3u32 {
+            let p = ease_out_cubic((step * 255) / 3) as i32;
+            let cur_w = 120 + ((492 - 120) * p) / 255;
+            let cur_h = 64 + ((290 - 64) * p) / 255;
+            let cx = 320 - cur_w / 2;
+            let cy = 227 - cur_h / 2;
+            fb_canvas.draw_arc_box(
+                cx,
+                cy,
+                cur_w,
+                cur_h,
+                ArcSharpStyle::modal(),
+                PANEL,
+                ACCENT_BLUE,
+                ACCENT_MAGENTA,
+            );
+            self.flush_fb(self.cfg.brightness);
+            sleep_ms(12);
+        }
     }
 
     fn draw_help_overlay(&self, c: &mut Canvas) {
         let lang = self.cfg.lang;
-        c.draw_box(74, 82, 492, 290, BG, ACCENT);
-        c.fill_rect(76, 84, 488, 28, PANEL);
-        c.draw_hollow_star(94, 98, 7, ACCENT);
+        if let Some(scratch) = self.blur_scratch() {
+            c.blur_tinted(
+                Rect {
+                    x: 74,
+                    y: 82,
+                    w: 492,
+                    h: 290,
+                },
+                3,
+                PANEL,
+                155,
+                scratch,
+            );
+        }
+        c.draw_arc_box(
+            74,
+            82,
+            492,
+            290,
+            ArcSharpStyle::modal(),
+            PANEL,
+            ACCENT_BLUE,
+            ACCENT_MAGENTA,
+        );
+        c.fill_rect(82, 86, 476, 28, PANEL_ALT);
+        c.fill_gradient_h(82, 114, 476, 2, ACCENT_BLUE, ACCENT_MAGENTA);
+        c.draw_arc_star(96, 100, 8, ACCENT_BLUE, ACCENT_MAGENTA);
         c.draw_text(
             110,
             91,
@@ -461,6 +581,9 @@ impl CompositorState {
         let key = self.poll_raw_key()?;
         if key.0 == KeyCode::F1 {
             self.help_open = !self.help_open;
+            if self.help_open {
+                self.animate_help_reveal(fb_canvas);
+            }
             self.composite_and_present(fb_canvas, child_shm);
             return None;
         }

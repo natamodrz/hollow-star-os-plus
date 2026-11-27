@@ -61,6 +61,7 @@ fn main() {
         "apps/hollow-star/Cargo.toml",
         "userland/libdelta-ui/src/lib.rs",
         "userland/libdelta-ui/src/calibri.rs",
+        "userland/libdelta-ui/src/fx.rs",
         "userland/libdelta-ui/src/gfx.rs",
         "userland/libdelta-ui/src/icons.rs",
         "userland/libdelta-ui/src/i18n.rs",
